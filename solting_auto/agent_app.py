@@ -22,6 +22,18 @@ ROOT = RES_DIR
 sys.path.insert(0, str(ROOT))
 load_dotenv(dotenv_path=APP_DIR / ".env")
 
+# config.yaml 자동 복사 (존재하지 않는 경우 예시용을 복사)
+config_path = APP_DIR / "config.yaml"
+if not config_path.exists():
+    import shutil
+    example_path = RES_DIR / "config.example.yaml"
+    if example_path.exists():
+        try:
+            shutil.copy2(example_path, config_path)
+            print("[설정] config.example.yaml을 config.yaml로 자동 복사했습니다.")
+        except Exception:
+            pass
+
 from solting_auto.runner import process_file, STAGE_SOLTING, STAGE_INSURANCE
 from solting_auto.reporter import SUCCESS, FAIL, SKIP
 from solting_auto.logger import get_logger
@@ -732,11 +744,16 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         step2_form.addRow("비밀번호:", self.input_login_pw)
         step2_form.addRow("생년월일:", self.input_login_birth)
         
+        step2_layout.addLayout(step2_form)
+
+        # 로그인 정보 저장 체크박스 추가
+        self.check_save_credentials = QtWidgets.QCheckBox("포털 자동 로그인 정보 기억하기")
+        self.check_save_credentials.setStyleSheet("color: #94a3b8; font-size: 9pt;")
+        step2_layout.addWidget(self.check_save_credentials)
+        
         self.btn_auto_login = QtWidgets.QPushButton("🔑 자동 로그인 실행")
         self.btn_auto_login.setStyleSheet("background-color: #2563eb; color: white; padding: 8px; font-weight: bold;")
         self.btn_auto_login.clicked.connect(self.run_auto_login)
-        
-        step2_layout.addLayout(step2_form)
         step2_layout.addWidget(self.btn_auto_login)
         layout.addWidget(group_step2)
 
@@ -1338,6 +1355,10 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         self.btn_auto_login.setEnabled(True)
         self.btn_auto_login.setText("🔑 자동 로그인 실행")
         if success:
+            if self.check_save_credentials.isChecked():
+                self.save_credentials()
+            else:
+                self.clear_credentials()
             QtWidgets.QMessageBox.information(self, "성공", msg)
             self.log_message("[알림] 포털 자동 로그인에 성공했습니다.")
         else:
@@ -1427,6 +1448,47 @@ class KkandoriAgent(QtWidgets.QMainWindow):
                 self.combo_file_format.setCurrentIndex(idx)
         except Exception as e:
             print(f"초기 값 로드 실패: {e}")
+            
+        self.load_credentials()
+
+    def save_credentials(self):
+        import json
+        import base64
+        data = {
+            "id": self.input_login_id.text().strip(),
+            "pw": self.input_login_pw.text().strip(),
+            "birth": self.input_login_birth.text().strip()
+        }
+        try:
+            json_str = json.dumps(data, ensure_ascii=False)
+            encoded = base64.b64encode(json_str.encode("utf-8")).decode("utf-8")
+            (APP_DIR / ".credentials").write_text(encoded, encoding="utf-8")
+        except Exception:
+            pass
+
+    def load_credentials(self):
+        import json
+        import base64
+        cred_file = APP_DIR / ".credentials"
+        if cred_file.exists():
+            try:
+                encoded = cred_file.read_text(encoding="utf-8").strip()
+                decoded = base64.b64decode(encoded.encode("utf-8")).decode("utf-8")
+                data = json.loads(decoded)
+                self.input_login_id.setText(data.get("id", ""))
+                self.input_login_pw.setText(data.get("pw", ""))
+                self.input_login_birth.setText(data.get("birth", ""))
+                self.check_save_credentials.setChecked(True)
+            except Exception:
+                pass
+
+    def clear_credentials(self):
+        try:
+            cred_file = APP_DIR / ".credentials"
+            if cred_file.exists():
+                cred_file.unlink()
+        except Exception:
+            pass
 
     # --- Automation Runner (Tab 2: Solting 1-3) ---
     def start_automation(self):
