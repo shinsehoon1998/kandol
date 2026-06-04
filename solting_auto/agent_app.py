@@ -449,7 +449,7 @@ class KkandoriAgent(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("깐돌이 전산등록 자동화 에이전트")
-        self.resize(900, 700)
+        self.resize(580, 780)
         self.supabase = None
         self.tenant = None
         self.device = None
@@ -497,29 +497,17 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         self.init_auth_tab()
         self.tabs.addTab(self.tab_auth, "🔐 기기 인증")
 
-        # Tab 2: Automation Main Control (Solting 1-3)
-        self.tab_control = QtWidgets.QWidget()
-        self.init_control_tab()
-        self.tabs.addTab(self.tab_control, "▶️ 동의서 출력 (1~3단계)")
+        # Tab 2: Automation Main Control (Unified Consent & EDMS)
+        self.tab_automation = QtWidgets.QWidget()
+        self.init_automation_tab()
+        self.tabs.addTab(self.tab_automation, "🚀 자동화 실행")
         self.tabs.setTabEnabled(1, False)
 
-        # Tab 3: EDMS Batch Upload Tab
-        self.tab_edms = QtWidgets.QWidget()
-        self.init_edms_tab()
-        self.tabs.addTab(self.tab_edms, "📁 EDMS 일괄 업로드")
+        # Tab 3: Configuration (Offsets & Delays Unified)
+        self.tab_settings = QtWidgets.QWidget()
+        self.init_settings_tab()
+        self.tabs.addTab(self.tab_settings, "⚙️ 설정")
         self.tabs.setTabEnabled(2, False)
-
-        # Tab 4: Offsets Configuration
-        self.tab_offsets = QtWidgets.QWidget()
-        self.init_offsets_tab()
-        self.tabs.addTab(self.tab_offsets, "🎯 세부 좌표 설정")
-        self.tabs.setTabEnabled(3, False)
-
-        # Tab 5: Delays Configuration
-        self.tab_delays = QtWidgets.QWidget()
-        self.init_delays_tab()
-        self.tabs.addTab(self.tab_delays, "⏳ 딜레이 설정")
-        self.tabs.setTabEnabled(4, False)
 
         # Status Bar
         self.statusBar().showMessage(f"기기 식별자(HWID): {self.hwid}")
@@ -665,26 +653,69 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         self.lbl_auth_status.setStyleSheet("color: #f87171; font-weight: bold;")
         layout.addWidget(self.lbl_auth_status)
 
-    def init_control_tab(self):
-        layout = QtWidgets.QVBoxLayout(self.tab_control)
-        layout.setContentsMargins(15, 15, 15, 15)
-        layout.setSpacing(15)
+    def init_automation_tab(self):
+        # 2개 뷰를 하나로 통합하고 토스 스타일로 전환
+        layout = QtWidgets.QVBoxLayout(self.tab_automation)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
 
-        # 1단계: Edge 브라우저 기동
-        group_step1 = QtWidgets.QGroupBox("1단계: KB전산 엣지브라우저 디버그 열기")
+        # Toss Style Segmented Toggle Bar
+        toggle_lay = QtWidgets.QHBoxLayout()
+        toggle_lay.setSpacing(4)
+        
+        self.btn_toggle_consent = QtWidgets.QPushButton("📄 동의서 등록 (1~3단계)")
+        self.btn_toggle_consent.setFixedHeight(38)
+        self.btn_toggle_consent.setStyleSheet("background-color: #2563eb; color: white; border-radius: 8px;")
+        self.btn_toggle_consent.clicked.connect(lambda: self.switch_automation_view(0))
+
+        self.btn_toggle_edms = QtWidgets.QPushButton("📤 EDMS 일괄 전송")
+        self.btn_toggle_edms.setFixedHeight(38)
+        self.btn_toggle_edms.setStyleSheet("background-color: #1e293b; color: #94a3b8; border-radius: 8px;")
+        self.btn_toggle_edms.clicked.connect(lambda: self.switch_automation_view(1))
+
+        toggle_lay.addWidget(self.btn_toggle_consent)
+        toggle_lay.addWidget(self.btn_toggle_edms)
+        layout.addLayout(toggle_lay)
+
+        # Stacked Layout
+        self.stack_automation = QtWidgets.QStackedWidget()
+        layout.addWidget(self.stack_automation)
+
+        # Page 1: Consent
+        self.panel_consent = QtWidgets.QWidget()
+        self.init_control_tab(self.panel_consent)
+        self.stack_automation.addWidget(self.panel_consent)
+
+        # Page 2: EDMS
+        self.panel_edms = QtWidgets.QWidget()
+        self.init_edms_tab(self.panel_edms)
+        self.stack_automation.addWidget(self.panel_edms)
+
+    def switch_automation_view(self, index):
+        self.stack_automation.setCurrentIndex(index)
+        if index == 0:
+            self.btn_toggle_consent.setStyleSheet("background-color: #2563eb; color: white; border-radius: 8px;")
+            self.btn_toggle_edms.setStyleSheet("background-color: #1e293b; color: #94a3b8; border-radius: 8px;")
+        else:
+            self.btn_toggle_consent.setStyleSheet("background-color: #1e293b; color: #94a3b8; border-radius: 8px;")
+            self.btn_toggle_edms.setStyleSheet("background-color: #2563eb; color: white; border-radius: 8px;")
+
+    def init_control_tab(self, parent_widget):
+        layout = QtWidgets.QVBoxLayout(parent_widget)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(8)
+
+        # 1단계
+        group_step1 = QtWidgets.QGroupBox("1단계: KB전산 브라우저 열기")
         step1_layout = QtWidgets.QVBoxLayout(group_step1)
-        step1_desc = QtWidgets.QLabel("원격 디버그 모드로 설정된 Edge 브라우저를 기동합니다. 실행된 브라우저 창은 전산 자동등록이 끝날 때까지 닫지 마세요.")
-        step1_desc.setWordWrap(True)
-        step1_desc.setStyleSheet("color: #94a3b8;")
         self.btn_open_edge = QtWidgets.QPushButton("🌐 Edge 브라우저 기동")
-        self.btn_open_edge.setStyleSheet("background-color: #2563eb; color: white; padding: 10px; font-weight: bold;")
+        self.btn_open_edge.setStyleSheet("background-color: #2563eb; color: white; padding: 8px; font-weight: bold;")
         self.btn_open_edge.clicked.connect(self.open_edge_browser)
-        step1_layout.addWidget(step1_desc)
         step1_layout.addWidget(self.btn_open_edge)
         layout.addWidget(group_step1)
 
-        # 2단계: 로그인 정보 입력 및 사이트 자동 로그인
-        group_step2 = QtWidgets.QGroupBox("2단계: 로그인 정보 입력 및 사이트 자동 로그인")
+        # 2단계
+        group_step2 = QtWidgets.QGroupBox("2단계: 포털 자동 로그인")
         step2_layout = QtWidgets.QVBoxLayout(group_step2)
         step2_form = QtWidgets.QFormLayout()
         
@@ -694,7 +725,7 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         self.input_login_pw.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
         self.input_login_pw.setPlaceholderText("비밀번호")
         self.input_login_birth = QtWidgets.QLineEdit()
-        self.input_login_birth.setPlaceholderText("생년월일 6자리 (예: 950101)")
+        self.input_login_birth.setPlaceholderText("생년월일 6자리")
         self.input_login_birth.setMaxLength(6)
 
         step2_form.addRow("설계사 ID:", self.input_login_id)
@@ -702,28 +733,28 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         step2_form.addRow("생년월일:", self.input_login_birth)
         
         self.btn_auto_login = QtWidgets.QPushButton("🔑 자동 로그인 실행")
-        self.btn_auto_login.setStyleSheet("background-color: #2563eb; color: white; padding: 10px; font-weight: bold;")
+        self.btn_auto_login.setStyleSheet("background-color: #2563eb; color: white; padding: 8px; font-weight: bold;")
         self.btn_auto_login.clicked.connect(self.run_auto_login)
         
         step2_layout.addLayout(step2_form)
         step2_layout.addWidget(self.btn_auto_login)
         layout.addWidget(group_step2)
 
-        # 3단계: 엑셀 로드 및 솔팅 자동 등록 시작
-        group_step3 = QtWidgets.QGroupBox("3단계: 엑셀 로드 및 솔팅 자동 등록 시작")
+        # 3단계
+        group_step3 = QtWidgets.QGroupBox("3단계: 엑셀 및 저장 설정")
         step3_layout = QtWidgets.QVBoxLayout(group_step3)
 
         # File Select
         file_layout = QtWidgets.QHBoxLayout()
         self.input_excel = QtWidgets.QLineEdit()
-        self.input_excel.setPlaceholderText("전산처리할 엑셀 파일을 선택하세요.")
+        self.input_excel.setPlaceholderText("처리할 엑셀 파일 선택")
         btn_browse = QtWidgets.QPushButton("📁 파일 선택")
         btn_browse.clicked.connect(self.browse_excel)
         file_layout.addWidget(self.input_excel)
         file_layout.addWidget(btn_browse)
         step3_layout.addLayout(file_layout)
 
-        # File format & Output folders
+        # Form fields
         folders_form = QtWidgets.QFormLayout()
         
         self.combo_file_format = QtWidgets.QComboBox()
@@ -738,38 +769,36 @@ class KkandoriAgent(QtWidgets.QMainWindow):
             "OZ Report Data File(*.ozd)"
         ])
         
-        # PDF 원본 저장 폴더
         pdf_folder_lay = QtWidgets.QHBoxLayout()
         self.input_pdf_folder = QtWidgets.QLineEdit()
-        self.input_pdf_folder.setPlaceholderText("예: C:\\MyFolder")
-        btn_pdf_browse = QtWidgets.QPushButton("📁 찾기")
+        self.input_pdf_folder.setPlaceholderText("PDF 원본 폴더")
+        btn_pdf_browse = QtWidgets.QPushButton("📁")
         btn_pdf_browse.clicked.connect(self.browse_pdf_folder)
         pdf_folder_lay.addWidget(self.input_pdf_folder)
         pdf_folder_lay.addWidget(btn_pdf_browse)
 
-        # 서명/프린트 스탬프 완료 폴더
         stamped_folder_lay = QtWidgets.QHBoxLayout()
         self.input_pdf_stamped_folder = QtWidgets.QLineEdit()
-        self.input_pdf_stamped_folder.setPlaceholderText("예: C:\\StampedFolder")
-        btn_stamped_browse = QtWidgets.QPushButton("📁 찾기")
+        self.input_pdf_stamped_folder.setPlaceholderText("서명 완료 폴더")
+        btn_stamped_browse = QtWidgets.QPushButton("📁")
         btn_stamped_browse.clicked.connect(self.browse_stamped_folder)
         stamped_folder_lay.addWidget(self.input_pdf_stamped_folder)
         stamped_folder_lay.addWidget(btn_stamped_browse)
 
-        folders_form.addRow("동의서 파일 형식:", self.combo_file_format)
-        folders_form.addRow("PDF 원본 저장 폴더:", pdf_folder_lay)
-        folders_form.addRow("서명 완료 폴더:", stamped_folder_lay)
+        folders_form.addRow("동의서 형식:", self.combo_file_format)
+        folders_form.addRow("원본 폴더:", pdf_folder_lay)
+        folders_form.addRow("완료 폴더:", stamped_folder_lay)
         step3_layout.addLayout(folders_form)
 
-        # Settings checkboxes
+        # Settings
         options_layout = QtWidgets.QHBoxLayout()
-        self.check_solting = QtWidgets.QCheckBox("1단계: 솔팅 전산등록")
-        self.check_solting.setChecked(False) # default match web UI
-        self.check_insurance = QtWidgets.QCheckBox("2단계: 보험사 등록 + 동의서 PDF")
+        self.check_solting = QtWidgets.QCheckBox("1단계")
+        self.check_solting.setChecked(False)
+        self.check_insurance = QtWidgets.QCheckBox("2단계")
         self.check_insurance.setChecked(True)
-        self.check_stamping = QtWidgets.QCheckBox("🖊️ 서명/스탬프 자동 기입")
+        self.check_stamping = QtWidgets.QCheckBox("🖊️ 스탬프")
         self.check_stamping.setChecked(True)
-        self.check_dry_run = QtWidgets.QCheckBox("미리검증 (Dry-Run)")
+        self.check_dry_run = QtWidgets.QCheckBox("Dry-Run")
         
         options_layout.addWidget(self.check_solting)
         options_layout.addWidget(self.check_insurance)
@@ -777,16 +806,16 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         options_layout.addWidget(self.check_dry_run)
         step3_layout.addLayout(options_layout)
 
-        # Automation triggers
+        # Triggers
         trigger_layout = QtWidgets.QHBoxLayout()
-        self.btn_run = QtWidgets.QPushButton("🚀 깐돌이 자동 등록 시작하기")
-        self.btn_run.setFont(QtGui.QFont("Inter", 11, QtGui.QFont.Weight.Bold))
-        self.btn_run.setStyleSheet("background-color: #10b981; color: white; padding: 12px; border-radius: 6px;")
+        self.btn_run = QtWidgets.QPushButton("🚀 깐돌이 자동 등록 시작")
+        self.btn_run.setFont(QtGui.QFont("Inter", 10, QtGui.QFont.Weight.Bold))
+        self.btn_run.setStyleSheet("background-color: #10b981; color: white; padding: 10px; border-radius: 6px;")
         self.btn_run.clicked.connect(self.start_automation)
 
         self.btn_stop = QtWidgets.QPushButton("🛑 중단 (Ctrl+D)")
-        self.btn_stop.setFont(QtGui.QFont("Inter", 11, QtGui.QFont.Weight.Bold))
-        self.btn_stop.setStyleSheet("background-color: #ef4444; color: white; padding: 12px; border-radius: 6px;")
+        self.btn_stop.setFont(QtGui.QFont("Inter", 10, QtGui.QFont.Weight.Bold))
+        self.btn_stop.setStyleSheet("background-color: #ef4444; color: white; padding: 10px; border-radius: 6px;")
         self.btn_stop.setEnabled(False)
         self.btn_stop.clicked.connect(self.stop_automation_manually)
 
@@ -798,51 +827,51 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         # Progress bar
         self.progress_bar = QtWidgets.QProgressBar()
         self.progress_bar.setValue(0)
+        self.progress_bar.setFixedHeight(12)
         layout.addWidget(self.progress_bar)
 
         # Console Logs
         self.console = QtWidgets.QTextBrowser()
+        self.console.setMaximumHeight(120)
         layout.addWidget(self.console)
 
-    def init_edms_tab(self):
-        layout = QtWidgets.QVBoxLayout(self.tab_edms)
-        layout.setContentsMargins(15, 15, 15, 15)
-        layout.setSpacing(12)
+    def init_edms_tab(self, parent_widget):
+        layout = QtWidgets.QVBoxLayout(parent_widget)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(8)
 
-        # Folder selection row
+        # Folder selection
         folder_layout = QtWidgets.QHBoxLayout()
         self.input_edms_folder = QtWidgets.QLineEdit()
-        self.input_edms_folder.setPlaceholderText("EDMS 일괄 업로드할 문서 폴더를 선택하세요.")
+        self.input_edms_folder.setPlaceholderText("EDMS 일괄 업로드할 폴더 선택")
         btn_browse_folder = QtWidgets.QPushButton("📁 폴더 선택")
         btn_browse_folder.clicked.connect(self.browse_edms_folder)
         folder_layout.addWidget(self.input_edms_folder)
         folder_layout.addWidget(btn_browse_folder)
         layout.addLayout(folder_layout)
 
-        # Found PDF files panel
-        layout.addWidget(QtWidgets.QLabel("업로드 대상 파일 목록"))
+        # List
         self.list_edms_files = QtWidgets.QListWidget()
-        self.list_edms_files.setMaximumHeight(120)
+        self.list_edms_files.setMaximumHeight(100)
         layout.addWidget(self.list_edms_files)
 
-        # Calibration & Settings GroupBox
-        group_calibrate = QtWidgets.QGroupBox("EDMS 매크로 설정 및 자동 보정")
+        # Calibrate Group
+        group_calibrate = QtWidgets.QGroupBox("EDMS 좌표 및 화면 자동 보정")
         cal_layout = QtWidgets.QVBoxLayout(group_calibrate)
         
         cal_btn_row = QtWidgets.QHBoxLayout()
-        self.btn_edms_calibrate = QtWidgets.QPushButton("🔍 EDMS 화면 좌표 자동 보정")
-        self.btn_edms_calibrate.setStyleSheet("background-color: #3b82f6; color: white; font-weight: bold;")
+        self.btn_edms_calibrate = QtWidgets.QPushButton("🔍 화면 좌표 자동 보정")
+        self.btn_edms_calibrate.setStyleSheet("background-color: #3b82f6; color: white; font-weight: bold; padding: 6px;")
         self.btn_edms_calibrate.clicked.connect(self.run_edms_calibration)
         self.btn_edms_save = QtWidgets.QPushButton("💾 설정 저장")
-        self.btn_edms_save.setStyleSheet("background-color: #2563eb; color: white; font-weight: bold;")
+        self.btn_edms_save.setStyleSheet("background-color: #2563eb; color: white; font-weight: bold; padding: 6px;")
         self.btn_edms_save.clicked.connect(self.save_config_to_server)
         cal_btn_row.addWidget(self.btn_edms_calibrate)
         cal_btn_row.addWidget(self.btn_edms_save)
         
-        # Real-time mouse tracker integration
         self.lbl_edms_mouse_coords = QtWidgets.QLabel("실시간 마우스 좌표: 추적 중단됨")
-        self.lbl_edms_mouse_coords.setFont(QtGui.QFont("Consolas", 10))
-        self.check_edms_track_mouse = QtWidgets.QCheckBox("실시간 추적 활성화")
+        self.lbl_edms_mouse_coords.setFont(QtGui.QFont("Consolas", 9))
+        self.check_edms_track_mouse = QtWidgets.QCheckBox("실시간 추적")
         self.check_edms_track_mouse.stateChanged.connect(self.toggle_edms_mouse_tracking)
         
         track_row = QtWidgets.QHBoxLayout()
@@ -853,16 +882,16 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         cal_layout.addLayout(track_row)
         layout.addWidget(group_calibrate)
 
-        # Control triggers
+        # Triggers
         trigger_layout = QtWidgets.QHBoxLayout()
         self.btn_edms_run = QtWidgets.QPushButton("▶️ EDMS 일괄 전송 시작")
-        self.btn_edms_run.setFont(QtGui.QFont("Inter", 11, QtGui.QFont.Weight.Bold))
-        self.btn_edms_run.setStyleSheet("background-color: #10b981; color: white; padding: 12px; border-radius: 6px;")
+        self.btn_edms_run.setFont(QtGui.QFont("Inter", 10, QtGui.QFont.Weight.Bold))
+        self.btn_edms_run.setStyleSheet("background-color: #10b981; color: white; padding: 10px; border-radius: 6px;")
         self.btn_edms_run.clicked.connect(self.start_edms_upload)
 
         self.btn_edms_stop = QtWidgets.QPushButton("🛑 중단 (Ctrl+D)")
-        self.btn_edms_stop.setFont(QtGui.QFont("Inter", 11, QtGui.QFont.Weight.Bold))
-        self.btn_edms_stop.setStyleSheet("background-color: #ef4444; color: white; padding: 12px; border-radius: 6px;")
+        self.btn_edms_stop.setFont(QtGui.QFont("Inter", 10, QtGui.QFont.Weight.Bold))
+        self.btn_edms_stop.setStyleSheet("background-color: #ef4444; color: white; padding: 10px; border-radius: 6px;")
         self.btn_edms_stop.setEnabled(False)
         self.btn_edms_stop.clicked.connect(self.stop_edms_upload_manually)
 
@@ -873,33 +902,38 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         # Progress bar
         self.progress_bar_edms = QtWidgets.QProgressBar()
         self.progress_bar_edms.setValue(0)
+        self.progress_bar_edms.setFixedHeight(12)
         layout.addWidget(self.progress_bar_edms)
 
         # Console logs
         self.edms_console = QtWidgets.QTextBrowser()
+        self.edms_console.setMaximumHeight(120)
         layout.addWidget(self.edms_console)
 
-    def init_offsets_tab(self):
-        layout = QtWidgets.QVBoxLayout(self.tab_offsets)
-        layout.setContentsMargins(15, 15, 15, 15)
-        layout.setSpacing(12)
+    def init_settings_tab(self):
+        main_layout = QtWidgets.QVBoxLayout(self.tab_settings)
+        main_layout.setContentsMargins(5, 5, 5, 5)
         
-        # Track mouse coordinates row
-        track_layout = QtWidgets.QHBoxLayout()
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_widget = QtWidgets.QWidget()
+        scroll_layout = QtWidgets.QVBoxLayout(scroll_widget)
+        scroll_layout.setSpacing(10)
+        
+        # 1. Tracker Group
+        track_group = QtWidgets.QGroupBox("📡 실시간 마우스 좌표 추적")
+        track_layout = QtWidgets.QHBoxLayout(track_group)
         self.lbl_mouse_coords = QtWidgets.QLabel("마우스 위치 추적: 중지됨 (X: -, Y: -)")
         self.lbl_mouse_coords.setFont(QtGui.QFont("Consolas", 10))
-        self.btn_track_mouse = QtWidgets.QPushButton("📡 마우스 좌표 추적 시작")
+        self.btn_track_mouse = QtWidgets.QPushButton("📡 좌표 추적 시작")
         self.btn_track_mouse.clicked.connect(self.toggle_mouse_tracking)
         track_layout.addWidget(self.lbl_mouse_coords)
         track_layout.addWidget(self.btn_track_mouse)
-        layout.addLayout(track_layout)
-
-        # Scroll Area for inputs
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        container = QtWidgets.QWidget()
-        self.offsets_layout = QtWidgets.QFormLayout(container)
-
+        scroll_layout.addWidget(track_group)
+        
+        # 2. Offsets Group
+        offsets_group = QtWidgets.QGroupBox("🎯 마우스 클릭 좌표 (오프셋 픽셀)")
+        offsets_form = QtWidgets.QFormLayout(offsets_group)
         self.offset_inputs = {}
         default_keys = [
             "image_add_x", "image_add_y", "select_all_x", "select_all_y", "send_x", "send_y",
@@ -914,48 +948,39 @@ class KkandoriAgent(QtWidgets.QMainWindow):
             spin.setValue(0)
             self.offset_inputs[key] = spin
             korean_label = OFFSET_LABELS.get(key, key)
-            self.offsets_layout.addRow(f"{korean_label}:", spin)
-
-        scroll.setWidget(container)
-        layout.addWidget(scroll)
-
-        # Sync buttons
-        sync_layout = QtWidgets.QHBoxLayout()
-        btn_load = QtWidgets.QPushButton("⬇️ 서버에서 불러오기")
-        btn_load.clicked.connect(self.load_config_from_server)
-        self.btn_save_server = QtWidgets.QPushButton("⬆️ 서버에 업로드")
-        self.btn_save_server.clicked.connect(self.save_config_to_server)
-
-        sync_layout.addWidget(btn_load)
-        sync_layout.addWidget(self.btn_save_server)
-        layout.addLayout(sync_layout)
-
-    def init_delays_tab(self):
-        layout = QtWidgets.QVBoxLayout(self.tab_delays)
-        layout.setContentsMargins(15, 15, 15, 15)
-        layout.setSpacing(12)
+            offsets_form.addRow(f"{korean_label}:", spin)
+        scroll_layout.addWidget(offsets_group)
         
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        container = QtWidgets.QWidget()
-        self.delays_layout = QtWidgets.QFormLayout(container)
-
+        # 3. Delays Group
+        delays_group = QtWidgets.QGroupBox("⏳ 딜레이 설정 (초 단위)")
+        delays_form = QtWidgets.QFormLayout(delays_group)
         self.delay_inputs = {}
-        default_keys = [
+        default_delay_keys = [
             "dialog_open_wait", "tab_click_wait", "folder_expand_wait", "search_wait",
             "image_load_wait", "select_all_wait", "send_confirm_wait", "success_alert_wait"
         ]
-        for key in default_keys:
+        for key in default_delay_keys:
             spin = QtWidgets.QDoubleSpinBox()
             spin.setRange(0.0, 120.0)
             spin.setSingleStep(0.1)
             spin.setValue(1.0)
             self.delay_inputs[key] = spin
             korean_label = DELAY_LABELS.get(key, key)
-            self.delays_layout.addRow(f"{korean_label}:", spin)
-
-        scroll.setWidget(container)
-        layout.addWidget(scroll)
+            delays_form.addRow(f"{korean_label}:", spin)
+        scroll_layout.addWidget(delays_group)
+        
+        scroll.setWidget(scroll_widget)
+        main_layout.addWidget(scroll)
+        
+        # 4. Sync Buttons
+        sync_layout = QtWidgets.QHBoxLayout()
+        btn_load = QtWidgets.QPushButton("⬇️ 서버에서 불러오기")
+        btn_load.clicked.connect(self.load_config_from_server)
+        self.btn_save_server = QtWidgets.QPushButton("⬆️ 서버에 업로드")
+        self.btn_save_server.clicked.connect(self.save_config_to_server)
+        sync_layout.addWidget(btn_load)
+        sync_layout.addWidget(self.btn_save_server)
+        main_layout.addLayout(sync_layout)
 
     def connect_supabase(self):
         if not SUPABASE_URL or not SUPABASE_KEY:
@@ -1138,8 +1163,6 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         # Enable all tabs
         self.tabs.setTabEnabled(1, True)
         self.tabs.setTabEnabled(2, True)
-        self.tabs.setTabEnabled(3, True)
-        self.tabs.setTabEnabled(4, True)
         self.tabs.setCurrentIndex(1) # Auto jump to Solting automation
 
         # Start heartbeats
@@ -1156,8 +1179,6 @@ class KkandoriAgent(QtWidgets.QMainWindow):
     def disable_all_tabs(self):
         self.tabs.setTabEnabled(1, False)
         self.tabs.setTabEnabled(2, False)
-        self.tabs.setTabEnabled(3, False)
-        self.tabs.setTabEnabled(4, False)
 
     def load_local_pin(self):
         pin_file = APP_DIR / ".pin"
