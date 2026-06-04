@@ -129,6 +129,14 @@ export default function RootLayout({
                 >
                   📜 전산 감사 로그
                 </Link>
+                <a 
+                  href="https://eryswnijlvkzpeamjtqu.supabase.co/storage/v1/object/public/agent-releases/Kkandori.zip" 
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-semibold text-slate-400 hover:bg-slate-800 hover:text-white transition-colors"
+                >
+                  📥 에이전트 다운로드
+                </a>
               </nav>
 
               <div className="p-4 border-t border-slate-800 bg-slate-900/50">
