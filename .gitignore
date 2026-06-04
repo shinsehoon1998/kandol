@@ -1,0 +1,25 @@
+# 민감정보 / 개인정보 - 절대 커밋 금지
+config.yaml
+.env
+input/
+output/
+uploads/
+*.xlsx
+*.xls
+
+# 파이썬
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 빌드 및 컴파일 산출물
+dist/
+build/
+*.spec
+
+# Next.js 어드민 웹
+web-admin/node_modules/
+web-admin/.next/
+web-admin/.env.local
+web-admin/out/

@@ -1,0 +1,132 @@
+# 솔팅프로그램 전산등록 자동화 - 설정 예시
+# 실제 운영 시 config.yaml 로 복사하여 사용하세요. (config.yaml 은 .gitignore 대상)
+# 비밀번호 등 민감정보는 환경변수(.env)로 분리하는 것을 권장합니다.
+
+site:
+  # 솔팅프로그램 로그인/등록 URL (실제 값으로 교체)
+  login_url: "https://example-solting.com/login"
+  register_url: "https://example-solting.com/register"
+
+# 로그인 자격증명
+# 보안상 비밀번호는 환경변수 SOLTING_PASSWORD 로 주입하는 것을 권장.
+# (config.yaml 에 직접 적으면 평문 노출 위험)
+credentials:
+  username: "your_id"
+  password_env: "SOLTING_PASSWORD"   # 이 환경변수에서 비밀번호를 읽음
+  # password: "직접입력가능(비권장)"
+
+# 웹 요소 셀렉터 - M0 화면 분석 후 실제 값으로 채워야 동작합니다.
+# CSS selector 또는 'text=...' / 'role=...' (Playwright 문법) 사용 가능
+selectors:
+  login:
+    username: "#userId"           # TODO: 실제 아이디 입력창
+    password: "#userPw"           # TODO: 실제 비밀번호 입력창
+    submit: "button[type=submit]" # TODO: 로그인 버튼
+    success_check: "text=로그아웃" # 로그인 성공 판별용(로그인 후에만 보이는 요소)
+  register:
+    jumin: "#jumin"               # TODO: 주민번호 입력창
+    name: "#name"                 # TODO: 이름 입력창
+    phone: "#phone"               # TODO: 전화번호 입력창
+    submit: "#saveBtn"            # TODO: 등록(저장) 버튼
+    success_check: "text=등록되었습니다"  # 등록 성공 메시지
+    error_check: "text=오류"              # 등록 실패 메시지(선택)
+
+# 입력 포맷 규칙
+format:
+  jumin_hyphen: true     # 주민번호에 하이픈 포함하여 입력(true) / 숫자만(false)
+  phone_hyphen: true     # 전화번호에 하이픈 포함하여 입력
+  jumin_checksum: false  # 주민번호 체크섬 검증 사용 여부(테스트 데이터면 false 권장)
+
+# 실행 동작 설정
+run:
+  watch_folder: "./input"        # 엑셀 업로드 감시 폴더
+  done_folder: "./input/완료"     # 처리 완료 파일 이동 위치
+  error_folder: "./input/오류"    # 오류 파일 이동 위치
+  output_folder: "./output"      # 리포트/로그/스크린샷 저장
+  row_delay_sec: 1.5             # 행 간 처리 간격(초) - 서버 부하/차단 방지
+  retry_count: 2                # 네트워크/요소 오류 시 재시도 횟수
+  retry_delay_sec: 3            # 재시도 간격(초)
+  element_timeout_ms: 10000     # 요소 대기 타임아웃
+  headless: false               # true=브라우저 숨김, false=화면 표시(디버깅 권장)
+
+# 엑셀 컬럼명 매핑 (고정 양식)
+columns:
+  jumin: "주민번호"
+  name: "이름"
+  phone: "전화번호"
+
+# 실행할 단계 선택 (둘 다 켜면 솔팅 등록 후 보험사 등록까지 진행)
+stages:
+  solting: true      # 1단계: 솔팅프로그램 전산등록
+  insurance: true    # 2단계: 보험사 전산 고객등록 + 동의서 PDF 출력
+
+# ── 2단계: KB손해보험 GA/교차 전용 - 동의서 출력 ──────────────────
+# 흐름: 로그인(아이디+비번+생년월일) → "동의서 출력" 메뉴 → 팝업에
+#       고객명/주민번호 입력 → "출력" → (네트워크 가로채기로) PDF 저장
+insurance:
+  login_url: "https://nsales.kbinsure.co.kr/eus/ch/ch_index.jsp"
+  # 로그인 후 메인 URL(성공 판별/이동에 사용, 선택)
+  main_url: "https://nsales.kbinsure.co.kr/wsserver/wq/main"
+
+  credentials:
+    username: "your_kb_id"               # 설계사 아이디
+    password_env: "INSURANCE_PASSWORD"   # .env 의 INSURANCE_PASSWORD
+    birthdate: "771023"                  # 생년월일 6자리(개인고유번호 로그인)
+
+  # 셀렉터 - 실제 로그인 후 DevTools(F12)로 확인해 채워야 합니다(아래 안내 참조)
+  selectors:
+    login:
+      tab_personal: "text=개인고유번호"   # '개인고유번호(생년월일)' 탭
+      username: "input[placeholder='아이디']"     # TODO 확인
+      password: "input[placeholder='비밀번호']"   # TODO 확인
+      birthdate: "input[placeholder*='생년월일']" # TODO 확인 (예) 771023
+      submit: "text=로그인"
+      success_check: "text=최근가입설계"   # 로그인 성공 시 메인에 보이는 요소
+    consent:
+      menu: "text=동의서 출력"             # 좌측 메뉴(동의서 출력)
+      # 팝업이 같은 페이지 모달인지, 새 창인지에 따라 처리(아래 popup_mode)
+      jumin: "#주민등록번호"               # TODO 확인: 주민등록번호 입력칸
+      name: "#고객명"                      # TODO 확인: 고객명 입력칸
+      agree_check: "text=가입설계"          # '가입설계(스캔/팩스 통합)' 체크박스
+      info_output_input: "text=입력"        # 고객정보출력여부=입력 라디오
+      single_input: "text=단독입력"          # 고객인적사항=단독입력 라디오
+      print_btn: "text=출력"                # 출력 버튼
+
+  # 동의서 출력 팝업 형태: "modal"(같은 페이지) | "window"(새 창)
+  popup_mode: "window"
+
+  # ── 브라우저 연결 방식 (Windows 권장: attach) ──────────────────
+  # attach : 사용자가 직접 로그인한 Edge/Chrome 에 CDP로 접속(보안프로그램 통과에 유리)
+  #          → start_edge_debug.bat 로 디버그 포트를 연 브라우저에서 수동 로그인 후 실행
+  # launch : 설치된 브라우저(채널)를 자동 실행 (보안프로그램이 막을 수 있음)
+  browser:
+    mode: "attach"
+    cdp_url: "http://localhost:9222"   # attach 모드: 디버그 포트
+    channel: "msedge"                  # launch 모드: msedge | chrome
+    skip_login: true                   # attach 모드면 보통 이미 로그인 상태 → 자동로그인 건너뜀
+
+  # PDF 캡처 방식:
+  #   oz_windows : 출력이 'OZ 리포트 뷰어'(데스크톱)로 뜨는 경우. Windows 에서
+  #                pywinauto 로 'Microsoft Print to PDF' 출력하여 저장 (KB 기본)
+  #   network    : 출력 응답(PDF/OZD)을 가로채 저장 (브라우저 내 PDF인 경우)
+  #   download   : 브라우저 다운로드 이벤트로 저장
+  pdf_capture: "oz_windows"
+  pdf_url_keywords: ["report", "oz", "pdf", "view", "CU01"]   # network 모드용
+
+  # ── OZ 리포트 뷰어 제어 (Windows 전용) ────────────────────────
+  oz:
+    # OZ 뷰어 창 제목에 포함된 키워드(창을 찾는 데 사용)
+    window_title_keywords: ["오즈 리포트 뷰어", "OZ Report", "리포트 뷰어"]
+    # PDF 저장 방법: "print_to_pdf"(Microsoft Print to PDF) | "save_as"(뷰어 저장>PDF)
+    method: "print_to_pdf"
+    printer_name: "Microsoft Print to PDF"
+    open_timeout_sec: 20      # 출력 후 OZ 뷰어가 뜨기까지 대기
+    dialog_timeout_sec: 15    # 인쇄/저장 대화상자 대기
+    # 좌표 기반 폴백이 필요할 때 사용(픽셀). 비워두면 컨트롤 식별 우선.
+    print_button_pos: []      # 예: [60, 110]
+
+  # 동의서 PDF 저장 폴더
+  pdf_folder: "./output/consent_pdfs"
+
+  # 진단 모드(network 캡처 시 요청 덤프)
+  network_debug: true

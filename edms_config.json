@@ -1,0 +1,38 @@
+{
+  "delays": {
+    "dialog_open_wait": 1.0,
+    "tab_click_wait": 1.0,
+    "folder_expand_wait": 1.5,
+    "search_wait": 2.0,
+    "image_load_wait": 4.0,
+    "select_all_wait": 1.0,
+    "send_confirm_wait": 0.5,
+    "success_alert_wait": 15.0
+  },
+  "offsets": {
+    "image_add_x": 1117,
+    "image_add_y": 252,
+    "select_all_x": 373,
+    "select_all_y": 272,
+    "send_x": 1185,
+    "send_y": 252,
+    "tab_local_pdf_x": 666,
+    "tab_local_pdf_y": 38,
+    "folder_docs_x": 578,
+    "folder_docs_y": 92,
+    "search_input_x": 883,
+    "search_input_y": 345,
+    "search_btn_x": 964,
+    "search_btn_y": 345,
+    "confirm_btn_x": 899,
+    "confirm_btn_y": 617,
+    "pop_send_btn_x": 194,
+    "pop_send_btn_y": 370,
+    "fallback_pop_send_x": 923,
+    "fallback_pop_send_y": 692
+  },
+  "ratios": {
+    "pop_send_x": 0.693989,
+    "pop_send_y": 0.873817
+  }
+}
