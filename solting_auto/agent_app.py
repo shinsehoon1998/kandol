@@ -713,8 +713,17 @@ class KkandoriAgent(QtWidgets.QMainWindow):
             self.btn_toggle_edms.setStyleSheet("background-color: #2563eb; color: white; border-radius: 8px;")
 
     def init_control_tab(self, parent_widget):
-        layout = QtWidgets.QVBoxLayout(parent_widget)
-        layout.setContentsMargins(5, 5, 5, 5)
+        main_layout = QtWidgets.QVBoxLayout(parent_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border: none; background-color: transparent; }")
+
+        scroll_widget = QtWidgets.QWidget()
+        scroll_widget.setStyleSheet("QWidget { background-color: transparent; }")
+        layout = QtWidgets.QVBoxLayout(scroll_widget)
+        layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
 
         # 1단계
@@ -852,9 +861,21 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         self.console.setMaximumHeight(120)
         layout.addWidget(self.console)
 
+        scroll.setWidget(scroll_widget)
+        main_layout.addWidget(scroll)
+
     def init_edms_tab(self, parent_widget):
-        layout = QtWidgets.QVBoxLayout(parent_widget)
-        layout.setContentsMargins(5, 5, 5, 5)
+        main_layout = QtWidgets.QVBoxLayout(parent_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border: none; background-color: transparent; }")
+
+        scroll_widget = QtWidgets.QWidget()
+        scroll_widget.setStyleSheet("QWidget { background-color: transparent; }")
+        layout = QtWidgets.QVBoxLayout(scroll_widget)
+        layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
 
         # Folder selection
@@ -927,6 +948,9 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         self.edms_console.setMaximumHeight(120)
         layout.addWidget(self.edms_console)
 
+        scroll.setWidget(scroll_widget)
+        main_layout.addWidget(scroll)
+
     def init_settings_tab(self):
         main_layout = QtWidgets.QVBoxLayout(self.tab_settings)
         main_layout.setContentsMargins(5, 5, 5, 5)
@@ -936,6 +960,31 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         scroll_widget = QtWidgets.QWidget()
         scroll_layout = QtWidgets.QVBoxLayout(scroll_widget)
         scroll_layout.setSpacing(10)
+
+        # 0. 화면 배율 조절 Group 추가
+        zoom_group = QtWidgets.QGroupBox("🔍 화면 스케일 및 폰트 크기 조절")
+        zoom_layout = QtWidgets.QVBoxLayout(zoom_group)
+        
+        lbl_zoom_desc = QtWidgets.QLabel("프로그램 화면이 잘려 보인다면 85% 배율을 선택해 주세요.")
+        lbl_zoom_desc.setStyleSheet("color: #94a3b8; font-size: 9pt;")
+        zoom_layout.addWidget(lbl_zoom_desc)
+        
+        btn_row = QtWidgets.QHBoxLayout()
+        self.radio_zoom_85 = QtWidgets.QRadioButton("작게 (85%)")
+        self.radio_zoom_100 = QtWidgets.QRadioButton("기본 (100%)")
+        self.radio_zoom_115 = QtWidgets.QRadioButton("크게 (115%)")
+        
+        self.radio_zoom_100.setChecked(True)
+        btn_row.addWidget(self.radio_zoom_85)
+        btn_row.addWidget(self.radio_zoom_100)
+        btn_row.addWidget(self.radio_zoom_115)
+        zoom_layout.addLayout(btn_row)
+        
+        self.radio_zoom_85.toggled.connect(lambda checked: checked and self.change_zoom_scale(0.85))
+        self.radio_zoom_100.toggled.connect(lambda checked: checked and self.change_zoom_scale(1.0))
+        self.radio_zoom_115.toggled.connect(lambda checked: checked and self.change_zoom_scale(1.15))
+        
+        scroll_layout.addWidget(zoom_group)
         
         # 1. Tracker Group
         track_group = QtWidgets.QGroupBox("📡 실시간 마우스 좌표 추적")
@@ -1420,6 +1469,27 @@ class KkandoriAgent(QtWidgets.QMainWindow):
             stamping_enabled = cfg.get("insurance", {}).get("stamping_enabled", True)
             file_format = cfg.get("insurance", {}).get("oz", {}).get("file_format", "PDF")
             
+            # UI Zoom 로드 및 적용
+            ui_cfg = cfg.get("ui", {})
+            zoom = ui_cfg.get("zoom", 1.0)
+            
+            self.radio_zoom_85.blockSignals(True)
+            self.radio_zoom_100.blockSignals(True)
+            self.radio_zoom_115.blockSignals(True)
+            
+            if zoom == 0.85:
+                self.radio_zoom_85.setChecked(True)
+            elif zoom == 1.15:
+                self.radio_zoom_115.setChecked(True)
+            else:
+                self.radio_zoom_100.setChecked(True)
+                
+            self.radio_zoom_85.blockSignals(False)
+            self.radio_zoom_100.blockSignals(False)
+            self.radio_zoom_115.blockSignals(False)
+            
+            self.update_global_stylesheet(zoom)
+            
             self.input_pdf_folder.setText(str(Path(pdf_folder).resolve()))
             self.input_pdf_stamped_folder.setText(str(Path(pdf_stamped_folder).resolve()))
             self.check_stamping.setChecked(stamping_enabled)
@@ -1450,6 +1520,141 @@ class KkandoriAgent(QtWidgets.QMainWindow):
             print(f"초기 값 로드 실패: {e}")
             
         self.load_credentials()
+
+    def update_global_stylesheet(self, ratio):
+        # 기준 폰트 크기 스케일링
+        font_9 = int(9 * ratio)
+        font_10 = int(10 * ratio)
+        font_12 = int(12 * ratio)
+        font_14 = int(14 * ratio)
+        font_16 = int(16 * ratio)
+        
+        # 패딩 및 마진 스케일링
+        padding_6 = int(6 * ratio)
+        padding_8 = int(8 * ratio)
+        padding_10 = int(10 * ratio)
+        padding_15 = int(15 * ratio)
+        padding_18 = int(18 * ratio)
+        
+        qss = f"""
+            QMainWindow {{
+                background-color: #0f172a;
+            }}
+            QTabWidget::pane {{
+                border: 1px solid #1e293b;
+                background-color: #0f172a;
+                border-radius: {int(16*ratio)}px;
+                padding: {padding_10}px;
+            }}
+            QTabBar::tab {{
+                background-color: #1e293b;
+                color: #94a3b8;
+                border: 1px solid #334155;
+                border-top-left-radius: {int(8*ratio)}px;
+                border-top-right-radius: {int(8*ratio)}px;
+                padding: {padding_10}px {padding_18}px;
+                margin-right: {int(4*ratio)}px;
+                font-size: {font_10}pt;
+                font-weight: bold;
+            }}
+            QTabBar::tab:selected {{
+                background-color: #2563eb;
+                color: white;
+                border-color: #2563eb;
+            }}
+            QGroupBox {{
+                border: 1px solid #1e293b;
+                border-radius: {int(12*ratio)}px;
+                margin-top: {padding_15}px;
+                padding-top: {padding_15}px;
+                font-weight: bold;
+                font-size: {font_10}pt;
+                color: #38bdf8;
+            }}
+            QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
+                background-color: #1e293b;
+                border: 1px solid #334155;
+                border-radius: {int(8*ratio)}px;
+                padding: {padding_8}px;
+                color: white;
+            }}
+            QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {{
+                border: 1px solid #2563eb;
+            }}
+            QPushButton {{
+                background-color: #2563eb;
+                color: white;
+                border: none;
+                border-radius: {int(10*ratio)}px;
+                padding: {padding_10}px;
+                font-size: {font_10}pt;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: #1d4ed8;
+            }}
+            QPushButton:disabled {{
+                background-color: #334155;
+                color: #64748b;
+            }}
+            QLabel {{
+                color: #cbd5e1;
+                font-size: {font_10}pt;
+            }}
+            QProgressBar {{
+                background-color: #1e293b;
+                border: 1px solid #334155;
+                border-radius: {int(8*ratio)}px;
+                text-align: center;
+                color: white;
+                font-weight: bold;
+                height: {int(20*ratio)}px;
+            }}
+            QProgressBar::chunk {{
+                background-color: #10b981;
+                border-radius: {int(6*ratio)}px;
+            }}
+            QListWidget {{
+                background-color: #1e293b;
+                border: 1px solid #334155;
+                border-radius: {int(10*ratio)}px;
+                color: white;
+            }}
+            QTextBrowser {{
+                background-color: #020617;
+                border: 1px solid #1e293b;
+                border-radius: {int(10*ratio)}px;
+                color: #38bdf8;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: {font_9}pt;
+            }}
+            QRadioButton, QCheckBox {{
+                color: #cbd5e1;
+                font-size: {font_10}pt;
+            }}
+        """
+        app = QtWidgets.QApplication.instance()
+        if app:
+            font = QtGui.QFont("Malgun Gothic", font_9)
+            app.setFont(font)
+            app.setStyleSheet(qss)
+
+    def change_zoom_scale(self, ratio):
+        self.update_global_stylesheet(ratio)
+        try:
+            config_path = APP_DIR / "config.yaml"
+            if config_path.exists():
+                import yaml
+                with open(config_path, "r", encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+                if "ui" not in cfg:
+                    cfg["ui"] = {}
+                cfg["ui"]["zoom"] = ratio
+                with open(config_path, "w", encoding="utf-8") as f:
+                    yaml.safe_dump(cfg, f, default_flow_style=False, allow_unicode=True)
+                self.log_message(f"[설정] 화면 배율을 {int(ratio*100)}%로 저장했습니다.")
+        except Exception as e:
+            print(f"화면 배율 저장 실패: {e}")
 
     def save_credentials(self):
         import json
