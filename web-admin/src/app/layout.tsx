@@ -94,11 +94,12 @@ export default function RootLayout({
             {/* Sidebar */}
             <aside className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col">
               <div className="p-6 border-b border-slate-800">
-                <Link href="/dashboard" className="text-xl font-black text-blue-500 block">
-                  ⚙️ 깐돌이 콘솔
+                <Link href="/dashboard" className="flex items-center gap-2 text-lg font-black text-white hover:text-blue-400 transition-colors">
+                  <img src="/mascot.png" alt="깐돌이 마스코트" className="h-8 w-8 rounded-lg object-contain bg-slate-800 border border-slate-700" />
+                  <span>깐돌이 콘솔</span>
                 </Link>
                 {profile?.tenants?.name && (
-                  <span className="text-xs text-slate-400 mt-1 block">
+                  <span className="text-xs text-slate-400 mt-2 block pl-1">
                     소속: {profile.tenants.name}
                   </span>
                 )}

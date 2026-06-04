@@ -47,15 +47,22 @@ export default function DevicesPage() {
 
   async function handleStatusChange(deviceId: string, status: 'approved' | 'blocked' | 'pending') {
     try {
-      const { error } = await supabase
+      const { data, error } = await supabase
         .from('devices')
         .update({ status })
-        .eq('id', deviceId);
+        .eq('id', deviceId)
+        .select('*, tenants(name)');
 
       if (error) throw error;
       
-      // Update local state
-      setDevices(prev => prev.map(d => d.id === deviceId ? { ...d, status } : d));
+      if (data && data.length > 0) {
+        setDevices(prev => prev.map(d => d.id === deviceId ? data[0] : d));
+        if (status === 'approved') {
+          alert(`기기가 승인되었어요! 발급된 PIN 번호: ${data[0].pin_code}`);
+        }
+      } else {
+        setDevices(prev => prev.map(d => d.id === deviceId ? { ...d, status } : d));
+      }
     } catch (err: any) {
       alert(`상태 수정 실패: ${err.message}`);
     }
@@ -102,6 +109,7 @@ export default function DevicesPage() {
                   <th className="py-3 px-4">기기 컴퓨터 이름</th>
                   {profile.role === 'super_admin' && <th className="py-3 px-4">회사명</th>}
                   <th className="py-3 px-4">상태</th>
+                  <th className="py-3 px-4">인증번호 (PIN)</th>
                   <th className="py-3 px-4">기기 고유키(HWID)</th>
                   <th className="py-3 px-4">신청 일자</th>
                   {isEditable && <th className="py-3 px-4 text-center">액션</th>}
@@ -122,6 +130,26 @@ export default function DevicesPage() {
                       }`}>
                         {device.status === 'approved' ? '승인 완료' : device.status === 'blocked' ? '차단됨' : '승인 대기'}
                       </span>
+                    </td>
+                    <td className="py-4 px-4">
+                      {device.status === 'approved' && device.pin_code ? (
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono font-bold text-yellow-400 text-sm tracking-wider bg-yellow-400/10 px-2 py-1 rounded border border-yellow-400/20">
+                            {device.pin_code}
+                          </span>
+                          <button
+                            onClick={() => {
+                              navigator.clipboard.writeText(device.pin_code);
+                              alert('PIN 번호를 클립보드에 복사했어요!');
+                            }}
+                            className="text-slate-400 hover:text-white text-xs px-2 py-1 border border-slate-700 rounded-md hover:bg-slate-800 transition-colors"
+                          >
+                            복사
+                          </button>
+                        </div>
+                      ) : (
+                        <span className="text-slate-500">-</span>
+                      )}
                     </td>
                     <td className="py-4 px-4 font-mono text-xs text-slate-400 max-w-[220px] truncate" title={device.hwid}>
                       {device.hwid}

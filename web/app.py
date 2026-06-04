@@ -35,7 +35,7 @@ from solting_auto.masking import mask_jumin, mask_phone
 
 
 
-app = Flask(__name__, template_folder=str(RES_DIR / "web" / "templates"))
+app = Flask(__name__, template_folder=str(RES_DIR / "web" / "templates"), static_folder=str(RES_DIR / "web" / "static"))
 
 CONFIG_PATH = os.environ.get("SOLTING_CONFIG", str(APP_DIR / "config.yaml"))
 UPLOAD_DIR = APP_DIR / "uploads"
