@@ -1003,7 +1003,10 @@ class InsuranceAutomation:
             return True
 
         # edms_config.json 로드
-        edms_cfg_path = Path("edms_config.json")
+        import sys
+        FROZEN = getattr(sys, "frozen", False)
+        APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).resolve().parent.parent
+        edms_cfg_path = APP_DIR / "edms_config.json"
         edms_cfg = {}
         if edms_cfg_path.exists():
             try:

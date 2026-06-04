@@ -14,9 +14,13 @@ from PyQt6 import QtWidgets, QtCore, QtGui
 from supabase import create_client, Client
 
 # Root directory configuration
-ROOT = Path(__file__).resolve().parent.parent
+FROZEN = getattr(sys, "frozen", False)
+RES_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
+APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).resolve().parent.parent
+
+ROOT = RES_DIR
 sys.path.insert(0, str(ROOT))
-load_dotenv(dotenv_path=ROOT / ".env")
+load_dotenv(dotenv_path=APP_DIR / ".env")
 
 from solting_auto.runner import process_file, STAGE_SOLTING, STAGE_INSURANCE
 from solting_auto.reporter import SUCCESS, FAIL, SKIP
@@ -394,6 +398,53 @@ class EDMSUploadWorker(QtCore.QThread):
             time.sleep(2)
 
 
+class LoginWorker(QtCore.QThread):
+    finished_signal = QtCore.pyqtSignal(bool, str)
+
+    def __init__(self, username, password, birthdate):
+        super().__init__()
+        self.username = username
+        self.password = password
+        self.birthdate = birthdate
+
+    def run(self):
+        try:
+            from solting_auto.config import load_config
+            from solting_auto.insurance import InsuranceAutomation
+            
+            cfg = load_config(str(APP_DIR / "config.yaml"))
+            cfg["insurance"]["browser"]["mode"] = "attach"
+            cfg["insurance"]["browser"]["cdp_url"] = "http://localhost:9222"
+            cfg["insurance"]["browser"]["skip_login"] = False
+            
+            logger = logging.getLogger("kkandori_agent")
+            
+            with InsuranceAutomation(cfg, logger) as auto:
+                auto.login(username=self.username, password=self.password, birthdate=self.birthdate, force=True)
+            self.finished_signal.emit(True, "자동 로그인에 성공했어요! 🔑")
+        except Exception as e:
+            self.finished_signal.emit(False, f"자동 로그인 실패: {e}")
+
+
+class CalibrateWorker(QtCore.QThread):
+    finished_signal = QtCore.pyqtSignal(bool, dict, str)
+
+    def run(self):
+        try:
+            import requests
+            res = requests.post("http://127.0.0.1:8000/edms/calibrate", timeout=12)
+            if res.status_code == 200:
+                data = res.json()
+                if data.get("success"):
+                    self.finished_signal.emit(True, data.get("detected", {}), "")
+                else:
+                    self.finished_signal.emit(False, {}, data.get("error", "알 수 없는 오류"))
+            else:
+                self.finished_signal.emit(False, {}, f"HTTP 에러 코드: {res.status_code}")
+        except Exception as e:
+            self.finished_signal.emit(False, {}, f"로컬 웹 서버가 기동되어 있지 않습니다. 먼저 웹 서버를 실행해 주세요.\n({e})")
+
+
 class KkandoriAgent(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
@@ -426,6 +477,7 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         self.heartbeat_timer.timeout.connect(self.send_heartbeat)
 
         self.init_ui()
+        self.load_initial_values()
         self.connect_supabase()
         
         # Shortcut handler
@@ -616,7 +668,50 @@ class KkandoriAgent(QtWidgets.QMainWindow):
     def init_control_tab(self):
         layout = QtWidgets.QVBoxLayout(self.tab_control)
         layout.setContentsMargins(15, 15, 15, 15)
-        layout.setSpacing(12)
+        layout.setSpacing(15)
+
+        # 1단계: Edge 브라우저 기동
+        group_step1 = QtWidgets.QGroupBox("1단계: KB전산 엣지브라우저 디버그 열기")
+        step1_layout = QtWidgets.QVBoxLayout(group_step1)
+        step1_desc = QtWidgets.QLabel("원격 디버그 모드로 설정된 Edge 브라우저를 기동합니다. 실행된 브라우저 창은 전산 자동등록이 끝날 때까지 닫지 마세요.")
+        step1_desc.setWordWrap(True)
+        step1_desc.setStyleSheet("color: #94a3b8;")
+        self.btn_open_edge = QtWidgets.QPushButton("🌐 Edge 브라우저 기동")
+        self.btn_open_edge.setStyleSheet("background-color: #2563eb; color: white; padding: 10px; font-weight: bold;")
+        self.btn_open_edge.clicked.connect(self.open_edge_browser)
+        step1_layout.addWidget(step1_desc)
+        step1_layout.addWidget(self.btn_open_edge)
+        layout.addWidget(group_step1)
+
+        # 2단계: 로그인 정보 입력 및 사이트 자동 로그인
+        group_step2 = QtWidgets.QGroupBox("2단계: 로그인 정보 입력 및 사이트 자동 로그인")
+        step2_layout = QtWidgets.QVBoxLayout(group_step2)
+        step2_form = QtWidgets.QFormLayout()
+        
+        self.input_login_id = QtWidgets.QLineEdit()
+        self.input_login_id.setPlaceholderText("설계사 ID")
+        self.input_login_pw = QtWidgets.QLineEdit()
+        self.input_login_pw.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
+        self.input_login_pw.setPlaceholderText("비밀번호")
+        self.input_login_birth = QtWidgets.QLineEdit()
+        self.input_login_birth.setPlaceholderText("생년월일 6자리 (예: 950101)")
+        self.input_login_birth.setMaxLength(6)
+
+        step2_form.addRow("설계사 ID:", self.input_login_id)
+        step2_form.addRow("비밀번호:", self.input_login_pw)
+        step2_form.addRow("생년월일:", self.input_login_birth)
+        
+        self.btn_auto_login = QtWidgets.QPushButton("🔑 자동 로그인 실행")
+        self.btn_auto_login.setStyleSheet("background-color: #2563eb; color: white; padding: 10px; font-weight: bold;")
+        self.btn_auto_login.clicked.connect(self.run_auto_login)
+        
+        step2_layout.addLayout(step2_form)
+        step2_layout.addWidget(self.btn_auto_login)
+        layout.addWidget(group_step2)
+
+        # 3단계: 엑셀 로드 및 솔팅 자동 등록 시작
+        group_step3 = QtWidgets.QGroupBox("3단계: 엑셀 로드 및 솔팅 자동 등록 시작")
+        step3_layout = QtWidgets.QVBoxLayout(group_step3)
 
         # File Select
         file_layout = QtWidgets.QHBoxLayout()
@@ -626,24 +721,65 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         btn_browse.clicked.connect(self.browse_excel)
         file_layout.addWidget(self.input_excel)
         file_layout.addWidget(btn_browse)
-        layout.addLayout(file_layout)
+        step3_layout.addLayout(file_layout)
+
+        # File format & Output folders
+        folders_form = QtWidgets.QFormLayout()
+        
+        self.combo_file_format = QtWidgets.QComboBox()
+        self.combo_file_format.addItems([
+            "Adobe PDF File(*.pdf)",
+            "Microsoft Excel File(*.xlsx)",
+            "Microsoft Excel 97-2003 File(*.xls)",
+            "Web Page(*.html)",
+            "Tab Separated(*.txt)",
+            "Comma Separated Values File(*.csv)",
+            "Hangul File(*.hwp)",
+            "OZ Report Data File(*.ozd)"
+        ])
+        
+        # PDF 원본 저장 폴더
+        pdf_folder_lay = QtWidgets.QHBoxLayout()
+        self.input_pdf_folder = QtWidgets.QLineEdit()
+        self.input_pdf_folder.setPlaceholderText("예: C:\\MyFolder")
+        btn_pdf_browse = QtWidgets.QPushButton("📁 찾기")
+        btn_pdf_browse.clicked.connect(self.browse_pdf_folder)
+        pdf_folder_lay.addWidget(self.input_pdf_folder)
+        pdf_folder_lay.addWidget(btn_pdf_browse)
+
+        # 서명/프린트 스탬프 완료 폴더
+        stamped_folder_lay = QtWidgets.QHBoxLayout()
+        self.input_pdf_stamped_folder = QtWidgets.QLineEdit()
+        self.input_pdf_stamped_folder.setPlaceholderText("예: C:\\StampedFolder")
+        btn_stamped_browse = QtWidgets.QPushButton("📁 찾기")
+        btn_stamped_browse.clicked.connect(self.browse_stamped_folder)
+        stamped_folder_lay.addWidget(self.input_pdf_stamped_folder)
+        stamped_folder_lay.addWidget(btn_stamped_browse)
+
+        folders_form.addRow("동의서 파일 형식:", self.combo_file_format)
+        folders_form.addRow("PDF 원본 저장 폴더:", pdf_folder_lay)
+        folders_form.addRow("서명 완료 폴더:", stamped_folder_lay)
+        step3_layout.addLayout(folders_form)
 
         # Settings checkboxes
         options_layout = QtWidgets.QHBoxLayout()
-        self.check_solting = QtWidgets.QCheckBox("솔팅전산등록")
-        self.check_solting.setChecked(True)
-        self.check_insurance = QtWidgets.QCheckBox("보험사등록 (동의서)")
+        self.check_solting = QtWidgets.QCheckBox("1단계: 솔팅 전산등록")
+        self.check_solting.setChecked(False) # default match web UI
+        self.check_insurance = QtWidgets.QCheckBox("2단계: 보험사 등록 + 동의서 PDF")
         self.check_insurance.setChecked(True)
-        self.check_dry_run = QtWidgets.QCheckBox("검증만 수행 (Dry-Run)")
+        self.check_stamping = QtWidgets.QCheckBox("🖊️ 서명/스탬프 자동 기입")
+        self.check_stamping.setChecked(True)
+        self.check_dry_run = QtWidgets.QCheckBox("미리검증 (Dry-Run)")
         
         options_layout.addWidget(self.check_solting)
         options_layout.addWidget(self.check_insurance)
+        options_layout.addWidget(self.check_stamping)
         options_layout.addWidget(self.check_dry_run)
-        layout.addLayout(options_layout)
+        step3_layout.addLayout(options_layout)
 
         # Automation triggers
         trigger_layout = QtWidgets.QHBoxLayout()
-        self.btn_run = QtWidgets.QPushButton("▶️ 전산 처리 시작")
+        self.btn_run = QtWidgets.QPushButton("🚀 깐돌이 자동 등록 시작하기")
         self.btn_run.setFont(QtGui.QFont("Inter", 11, QtGui.QFont.Weight.Bold))
         self.btn_run.setStyleSheet("background-color: #10b981; color: white; padding: 12px; border-radius: 6px;")
         self.btn_run.clicked.connect(self.start_automation)
@@ -656,7 +792,8 @@ class KkandoriAgent(QtWidgets.QMainWindow):
 
         trigger_layout.addWidget(self.btn_run)
         trigger_layout.addWidget(self.btn_stop)
-        layout.addLayout(trigger_layout)
+        step3_layout.addLayout(trigger_layout)
+        layout.addWidget(group_step3)
 
         # Progress bar
         self.progress_bar = QtWidgets.QProgressBar()
@@ -685,14 +822,42 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         # Found PDF files panel
         layout.addWidget(QtWidgets.QLabel("업로드 대상 파일 목록"))
         self.list_edms_files = QtWidgets.QListWidget()
-        self.list_edms_files.setMaximumHeight(150)
+        self.list_edms_files.setMaximumHeight(120)
         layout.addWidget(self.list_edms_files)
+
+        # Calibration & Settings GroupBox
+        group_calibrate = QtWidgets.QGroupBox("EDMS 매크로 설정 및 자동 보정")
+        cal_layout = QtWidgets.QVBoxLayout(group_calibrate)
+        
+        cal_btn_row = QtWidgets.QHBoxLayout()
+        self.btn_edms_calibrate = QtWidgets.QPushButton("🔍 EDMS 화면 좌표 자동 보정")
+        self.btn_edms_calibrate.setStyleSheet("background-color: #3b82f6; color: white; font-weight: bold;")
+        self.btn_edms_calibrate.clicked.connect(self.run_edms_calibration)
+        self.btn_edms_save = QtWidgets.QPushButton("💾 설정 저장")
+        self.btn_edms_save.setStyleSheet("background-color: #2563eb; color: white; font-weight: bold;")
+        self.btn_edms_save.clicked.connect(self.save_config_to_server)
+        cal_btn_row.addWidget(self.btn_edms_calibrate)
+        cal_btn_row.addWidget(self.btn_edms_save)
+        
+        # Real-time mouse tracker integration
+        self.lbl_edms_mouse_coords = QtWidgets.QLabel("실시간 마우스 좌표: 추적 중단됨")
+        self.lbl_edms_mouse_coords.setFont(QtGui.QFont("Consolas", 10))
+        self.check_edms_track_mouse = QtWidgets.QCheckBox("실시간 추적 활성화")
+        self.check_edms_track_mouse.stateChanged.connect(self.toggle_edms_mouse_tracking)
+        
+        track_row = QtWidgets.QHBoxLayout()
+        track_row.addWidget(self.lbl_edms_mouse_coords)
+        track_row.addWidget(self.check_edms_track_mouse)
+        
+        cal_layout.addLayout(cal_btn_row)
+        cal_layout.addLayout(track_row)
+        layout.addWidget(group_calibrate)
 
         # Control triggers
         trigger_layout = QtWidgets.QHBoxLayout()
         self.btn_edms_run = QtWidgets.QPushButton("▶️ EDMS 일괄 전송 시작")
         self.btn_edms_run.setFont(QtGui.QFont("Inter", 11, QtGui.QFont.Weight.Bold))
-        self.btn_edms_run.setStyleSheet("background-color: #3b82f6; color: white; padding: 12px; border-radius: 6px;")
+        self.btn_edms_run.setStyleSheet("background-color: #10b981; color: white; padding: 12px; border-radius: 6px;")
         self.btn_edms_run.clicked.connect(self.start_edms_upload)
 
         self.btn_edms_stop = QtWidgets.QPushButton("🛑 중단 (Ctrl+D)")
@@ -995,7 +1160,7 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         self.tabs.setTabEnabled(4, False)
 
     def load_local_pin(self):
-        pin_file = ROOT / ".pin"
+        pin_file = APP_DIR / ".pin"
         if pin_file.exists():
             try:
                 return pin_file.read_text(encoding="utf-8").strip()
@@ -1005,13 +1170,13 @@ class KkandoriAgent(QtWidgets.QMainWindow):
 
     def save_local_pin(self, pin):
         try:
-            (ROOT / ".pin").write_text(pin, encoding="utf-8")
+            (APP_DIR / ".pin").write_text(pin, encoding="utf-8")
         except Exception:
             pass
 
     def delete_local_pin(self):
         try:
-            pin_file = ROOT / ".pin"
+            pin_file = APP_DIR / ".pin"
             if pin_file.exists():
                 pin_file.unlink()
         except Exception:
@@ -1082,12 +1247,23 @@ class KkandoriAgent(QtWidgets.QMainWindow):
 
     def update_mouse_pos(self, x, y):
         self.lbl_mouse_coords.setText(f"마우스 위치 추적 중: X: {x}, Y: {y}")
+        self.lbl_edms_mouse_coords.setText(f"실시간 마우스 좌표: X: {x}, Y: {y}")
 
     # --- File browsers ---
     def browse_excel(self):
         file_path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "엑셀 파일 선택", "", "Excel Files (*.xlsx *.xls)")
         if file_path:
             self.input_excel.setText(file_path)
+
+    def browse_pdf_folder(self):
+        dir_path = QtWidgets.QFileDialog.getExistingDirectory(self, "PDF 원본 저장 폴더 선택")
+        if dir_path:
+            self.input_pdf_folder.setText(dir_path)
+
+    def browse_stamped_folder(self):
+        dir_path = QtWidgets.QFileDialog.getExistingDirectory(self, "서명 완료 폴더 선택")
+        if dir_path:
+            self.input_pdf_stamped_folder.setText(dir_path)
 
     def browse_edms_folder(self):
         dir_path = QtWidgets.QFileDialog.getExistingDirectory(self, "EDMS 업로드할 폴더 선택")
@@ -1106,6 +1282,131 @@ class KkandoriAgent(QtWidgets.QMainWindow):
                 self.edms_pdf_paths.append(str(p.resolve()))
             self.log_edms_message(f"[스캔] {len(self.edms_pdf_paths)}개의 PDF 파일을 감지했어요.")
 
+    # --- Step 1 & 2 Logic ---
+    def open_edge_browser(self):
+        self.btn_open_edge.setEnabled(False)
+        self.btn_open_edge.setText("Edge 기동 중...")
+        try:
+            cmd = 'start "" msedge.exe --remote-debugging-port=9222 --user-data-dir="%USERPROFILE%\\kb-edge-debug" "https://nsales.kbinsure.co.kr/eus/ch/ch_index.jsp"'
+            subprocess.Popen(cmd, shell=True)
+            self.log_message("[알림] Edge 브라우저를 디버그 포트 9222로 기동했습니다. (브라우저 창을 닫지 마세요)")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "오류", f"Edge 브라우저 기동 실패: {e}")
+        finally:
+            self.btn_open_edge.setEnabled(True)
+            self.btn_open_edge.setText("🌐 Edge 브라우저 기동")
+
+    def run_auto_login(self):
+        username = self.input_login_id.text().strip()
+        password = self.input_login_pw.text().strip()
+        birthdate = self.input_login_birth.text().strip()
+
+        if not username or not password or not birthdate:
+            QtWidgets.QMessageBox.warning(self, "경고", "아이디, 비밀번호, 생년월일을 모두 입력해 주세요.")
+            return
+
+        self.btn_auto_login.setEnabled(False)
+        self.btn_auto_login.setText("자동 로그인 수행 중...")
+        self.log_message("[알림] 포털 자동 로그인을 수행하는 중입니다. 잠시만 기다려 주세요...")
+        
+        self.login_worker = LoginWorker(username, password, birthdate)
+        self.login_worker.finished_signal.connect(self.on_login_finished)
+        self.login_worker.start()
+
+    def on_login_finished(self, success, msg):
+        self.btn_auto_login.setEnabled(True)
+        self.btn_auto_login.setText("🔑 자동 로그인 실행")
+        if success:
+            QtWidgets.QMessageBox.information(self, "성공", msg)
+            self.log_message("[알림] 포털 자동 로그인에 성공했습니다.")
+        else:
+            QtWidgets.QMessageBox.critical(self, "오류", msg)
+            self.log_message(f"[오류] 자동 로그인 실패: {msg}")
+
+    # --- EDMS Calibration & Tracker Logic ---
+    def run_edms_calibration(self):
+        self.btn_edms_calibrate.setEnabled(False)
+        self.btn_edms_calibrate.setText("보정 계산 중...")
+        self.log_edms_message("[보정] 로컬 웹 서버 API를 호출하여 EDMS 화면 좌표 자동 보정을 진행합니다...")
+        
+        self.cal_worker = CalibrateWorker()
+        self.cal_worker.finished_signal.connect(self.on_calibration_finished)
+        self.cal_worker.start()
+
+    def on_calibration_finished(self, success, detected, err_msg):
+        self.btn_edms_calibrate.setEnabled(True)
+        self.btn_edms_calibrate.setText("🔍 EDMS 화면 좌표 자동 보정")
+        
+        if success:
+            updated_count = 0
+            for k, v in detected.items():
+                if k in self.offset_inputs:
+                    self.offset_inputs[k].setValue(int(v))
+                    updated_count += 1
+            if updated_count > 0:
+                QtWidgets.QMessageBox.information(
+                    self, "성공", 
+                    f"자동 보정 성공! {updated_count}개의 주요 좌표를 갱신했습니다.\n설정을 영구 반영하려면 [💾 설정 저장] 또는 [⬆️ 서버에 업로드] 버튼을 꼭 눌러주세요."
+                )
+                self.log_edms_message(f"[보정] {updated_count}개의 주요 좌표 보정값을 갱신했습니다.")
+            else:
+                QtWidgets.QMessageBox.warning(self, "안내", "분석은 완료했으나 유효한 버튼 좌표를 검출하지 못했습니다.")
+                self.log_edms_message("[보정] 유효한 버튼 좌표 검출 실패")
+        else:
+            QtWidgets.QMessageBox.critical(self, "보정 실패", err_msg)
+            self.log_edms_message(f"[오류] 자동 보정 실패: {err_msg}")
+
+    def toggle_edms_mouse_tracking(self, state):
+        if state == 2: # Checked
+            self.lbl_edms_mouse_coords.setText("추적 중...")
+            if not self.mouse_tracker.isRunning():
+                self.mouse_tracker.start()
+                self.btn_track_mouse.setText("📡 마우스 좌표 추적 중지")
+        else: # Unchecked
+            self.lbl_edms_mouse_coords.setText("실시간 마우스 좌표: 추적 중단됨")
+            if self.btn_track_mouse.text() == "📡 마우스 좌표 추적 시작":
+                if self.mouse_tracker.isRunning():
+                    self.mouse_tracker.stop()
+
+    def load_initial_values(self):
+        try:
+            from solting_auto.config import load_config
+            cfg = load_config(str(APP_DIR / "config.yaml"))
+            
+            pdf_folder = cfg.get("insurance", {}).get("pdf_folder", "./output/consent_pdfs")
+            pdf_stamped_folder = cfg.get("insurance", {}).get("pdf_stamped_folder", "./output/consent_pdfs_stamped")
+            stamping_enabled = cfg.get("insurance", {}).get("stamping_enabled", True)
+            file_format = cfg.get("insurance", {}).get("oz", {}).get("file_format", "PDF")
+            
+            self.input_pdf_folder.setText(str(Path(pdf_folder).resolve()))
+            self.input_pdf_stamped_folder.setText(str(Path(pdf_stamped_folder).resolve()))
+            self.check_stamping.setChecked(stamping_enabled)
+            
+            shorthand_map = {
+                "PDF": "Adobe PDF File(*.pdf)",
+                "Adobe PDF File(*.pdf)": "Adobe PDF File(*.pdf)",
+                "Excel": "Microsoft Excel File(*.xlsx)",
+                "Microsoft Excel File(*.xlsx)": "Microsoft Excel File(*.xlsx)",
+                "xls": "Microsoft Excel 97-2003 File(*.xls)",
+                "Microsoft Excel 97-2003 File(*.xls)": "Microsoft Excel 97-2003 File(*.xls)",
+                "HTML": "Web Page(*.html)",
+                "Web Page(*.html)": "Web Page(*.html)",
+                "TXT": "Tab Separated(*.txt)",
+                "Tab Separated(*.txt)": "Tab Separated(*.txt)",
+                "CSV": "Comma Separated Values File(*.csv)",
+                "Comma Separated Values File(*.csv)": "Comma Separated Values File(*.csv)",
+                "HWP": "Hangul File(*.hwp)",
+                "Hangul File(*.hwp)": "Hangul File(*.hwp)",
+                "OZD": "OZ Report Data File(*.ozd)",
+                "OZ Report Data File(*.ozd)": "OZ Report Data File(*.ozd)"
+            }
+            mapped_format = shorthand_map.get(file_format, "Adobe PDF File(*.pdf)")
+            idx = self.combo_file_format.findText(mapped_format)
+            if idx >= 0:
+                self.combo_file_format.setCurrentIndex(idx)
+        except Exception as e:
+            print(f"초기 값 로드 실패: {e}")
+
     # --- Automation Runner (Tab 2: Solting 1-3) ---
     def start_automation(self):
         xlsx_path = self.input_excel.text().strip()
@@ -1123,15 +1424,15 @@ class KkandoriAgent(QtWidgets.QMainWindow):
                 "insurance": self.check_insurance.isChecked()
             },
             "run": {
-                "output_folder": str(ROOT / "output"),
+                "output_folder": str(APP_DIR / "output"),
                 "retry_count": 1,
                 "retry_delay_sec": 2,
                 "row_delay_sec": 1.0
             },
             "insurance": {
-                "pdf_folder": str(ROOT / "output" / "consent_pdfs"),
-                "pdf_stamped_folder": str(ROOT / "output" / "consent_pdfs_stamped"),
-                "stamping_enabled": True,
+                "pdf_folder": self.input_pdf_folder.text().strip() or str(APP_DIR / "output" / "consent_pdfs"),
+                "pdf_stamped_folder": self.input_pdf_stamped_folder.text().strip() or str(APP_DIR / "output" / "consent_pdfs_stamped"),
+                "stamping_enabled": self.check_stamping.isChecked(),
                 "kb_scan_enabled": True,
                 "browser": {
                     "mode": "attach",
@@ -1139,7 +1440,7 @@ class KkandoriAgent(QtWidgets.QMainWindow):
                     "skip_login": True
                 },
                 "oz": {
-                    "file_format": "PDF"
+                    "file_format": self.combo_file_format.currentText()
                 }
             },
             "columns": {
@@ -1246,7 +1547,7 @@ class KkandoriAgent(QtWidgets.QMainWindow):
 
         config = {
             "run": {
-                "output_folder": str(ROOT / "output"),
+                "output_folder": str(APP_DIR / "output"),
             },
             "insurance": {
                 "offsets": {k: spin.value() for k, spin in self.offset_inputs.items()},
