@@ -131,7 +131,7 @@ export default function RootLayout({
                   📜 전산 감사 로그
                 </Link>
                 <a 
-                  href="https://github.com/shinsehoon1998/kandol/releases/download/v1.0.0/Kkandori.zip" 
+                  href="https://eryswnijlvkzpeamjtqu.supabase.co/storage/v1/object/public/agent-releases/Kkandori.zip" 
                   target="_blank"
                   rel="noreferrer"
                   className="flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-semibold text-slate-400 hover:bg-slate-800 hover:text-white transition-colors"
