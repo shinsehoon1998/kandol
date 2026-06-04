@@ -52,6 +52,9 @@ class SoltingAutomation:
 
     # --- 로그인 (FR-3.1) ---
     def login(self):
+        import solting_auto
+        solting_auto.check_stop()
+
         site = self.cfg["site"]
         creds = self.cfg["credentials"]
         password = creds.get("_resolved_password")
@@ -77,6 +80,9 @@ class SoltingAutomation:
     # --- 단일 건 등록 (FR-3.2, 3.3) ---
     def register_one(self, jumin: str, name: str, phone: str) -> None:
         """1건 등록. 성공 시 정상 반환, 실패 시 예외."""
+        import solting_auto
+        solting_auto.check_stop()
+
         site = self.cfg["site"]
         s = self.sel["register"]
 

@@ -57,14 +57,14 @@ columns:
 
 # 실행할 단계 선택 (둘 다 켜면 솔팅 등록 후 보험사 등록까지 진행)
 stages:
-  solting: true      # 1단계: 솔팅프로그램 전산등록
+  solting: false     # 1단계: 솔팅프로그램 전산등록 (예시용 단계 비활성화)
   insurance: true    # 2단계: 보험사 전산 고객등록 + 동의서 PDF 출력
 
 # ── 2단계: KB손해보험 GA/교차 전용 - 동의서 출력 ──────────────────
 # 흐름: 로그인(아이디+비번+생년월일) → "동의서 출력" 메뉴 → 팝업에
 #       고객명/주민번호 입력 → "출력" → (네트워크 가로채기로) PDF 저장
 insurance:
-  login_url: "https://nsales.kbinsure.co.kr/eus/ch/ch_index.jsp"
+  login_url: "https://nsales.kbinsure.co.kr:8500/"
   # 로그인 후 메인 URL(성공 판별/이동에 사용, 선택)
   main_url: "https://nsales.kbinsure.co.kr/wsserver/wq/main"
 
@@ -73,24 +73,24 @@ insurance:
     password_env: "INSURANCE_PASSWORD"   # .env 의 INSURANCE_PASSWORD
     birthdate: "771023"                  # 생년월일 6자리(개인고유번호 로그인)
 
-  # 셀렉터 - 실제 로그인 후 DevTools(F12)로 확인해 채워야 합니다(아래 안내 참조)
+  # 셀렉터 - 실제 로그인 후 DevTools(F12)로 확인해 채워야 합니다
   selectors:
     login:
-      tab_personal: "text=개인고유번호"   # '개인고유번호(생년월일)' 탭
-      username: "input[placeholder='아이디']"     # TODO 확인
-      password: "input[placeholder='비밀번호']"   # TODO 확인
-      birthdate: "input[placeholder*='생년월일']" # TODO 확인 (예) 771023
-      submit: "text=로그인"
+      tab_personal: "#psnum"   # '개인고유번호(생년월일)' 탭
+      username: "#userid"     # 아이디 입력창
+      password: "#pwd"        # 비밀번호 입력창
+      birthdate: "#resNo"     # 생년월일 6자리
+      submit: "a.btn_longin"  # 로그인 버튼
       success_check: "text=최근가입설계"   # 로그인 성공 시 메인에 보이는 요소
     consent:
-      menu: "text=동의서 출력"             # 좌측 메뉴(동의서 출력)
+      menu: "text=/동의서\\s*출력/"             # 좌측 메뉴(동의서 출력, 개행 대응)
       # 팝업이 같은 페이지 모달인지, 새 창인지에 따라 처리(아래 popup_mode)
-      jumin: "#주민등록번호"               # TODO 확인: 주민등록번호 입력칸
-      name: "#고객명"                      # TODO 확인: 고객명 입력칸
+      jumin: "[id*='iptCustIdno']"               # 주민등록번호 입력칸 (진단 스캔 기반 정밀 ID)
+      name: "[id*='iptCustNm']"                  # 고객명 입력칸 (진단 스캔 기반 정밀 ID)
       agree_check: "text=가입설계"          # '가입설계(스캔/팩스 통합)' 체크박스
       info_output_input: "text=입력"        # 고객정보출력여부=입력 라디오
       single_input: "text=단독입력"          # 고객인적사항=단독입력 라디오
-      print_btn: "text=출력"                # 출력 버튼
+      print_btn: "[id*='btnCnfm00']"                # 출력 버튼 (진단 스캔 기반 정밀 ID)
 
   # 동의서 출력 팝업 형태: "modal"(같은 페이지) | "window"(새 창)
   popup_mode: "window"
@@ -118,8 +118,8 @@ insurance:
     # OZ 뷰어 창 제목에 포함된 키워드(창을 찾는 데 사용)
     window_title_keywords: ["오즈 리포트 뷰어", "OZ Report", "리포트 뷰어"]
     # PDF 저장 방법: "print_to_pdf"(Microsoft Print to PDF) | "save_as"(뷰어 저장>PDF)
-    method: "print_to_pdf"
-    printer_name: "Microsoft Print to PDF"
+    method: "save_as"
+    printer_name: "ALPDF"
     open_timeout_sec: 20      # 출력 후 OZ 뷰어가 뜨기까지 대기
     dialog_timeout_sec: 15    # 인쇄/저장 대화상자 대기
     # 좌표 기반 폴백이 필요할 때 사용(픽셀). 비워두면 컨트롤 식별 우선.
@@ -127,6 +127,10 @@ insurance:
 
   # 동의서 PDF 저장 폴더
   pdf_folder: "./output/consent_pdfs"
+  # 서명 및 스탬핑된 PDF 저장 폴더
+  pdf_stamped_folder: "./output/consent_pdfs_stamped"
+  # 서명 및 스탬핑 자동 처리 여부
+  stamping_enabled: true
 
   # 진단 모드(network 캡처 시 요청 덤프)
   network_debug: true

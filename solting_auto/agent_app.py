@@ -142,6 +142,9 @@ class AutomationWorker(QtCore.QThread):
         self.polling_active = True
 
     def run(self):
+        import solting_auto
+        solting_auto.register_stop_check(lambda: getattr(self, "stop_requested", False))
+
         # Start remote stop polling thread
         polling_thread = threading.Thread(target=self._poll_stop_status, daemon=True)
         polling_thread.start()
@@ -182,7 +185,8 @@ class AutomationWorker(QtCore.QThread):
                 self.config, 
                 logger, 
                 dry_run=self.dry_run, 
-                progress_cb=progress_cb
+                progress_cb=progress_cb,
+                stop_check_cb=lambda: getattr(self, "stop_requested", False)
             )
 
             # Check if user requested stop
@@ -300,6 +304,9 @@ class EDMSUploadWorker(QtCore.QThread):
         self.polling_active = True
 
     def run(self):
+        import solting_auto
+        solting_auto.register_stop_check(lambda: getattr(self, "stop_requested", False))
+
         # Start remote stop polling thread
         polling_thread = threading.Thread(target=self._poll_stop_status, daemon=True)
         polling_thread.start()
@@ -521,6 +528,11 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         self.tabs.addTab(self.tab_settings, "⚙️ 설정")
         self.tabs.setTabEnabled(2, False)
 
+        # Tab 4: User Guides (Always enabled so users can read before authentication)
+        self.tab_guide = QtWidgets.QWidget()
+        self.init_guide_tab()
+        self.tabs.addTab(self.tab_guide, "📖 사용 가이드")
+
         # Status Bar
         self.statusBar().showMessage(f"기기 식별자(HWID): {self.hwid}")
 
@@ -727,17 +739,17 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         layout.setSpacing(8)
 
         # 1단계
-        group_step1 = QtWidgets.QGroupBox("1단계: KB전산 브라우저 열기")
-        step1_layout = QtWidgets.QVBoxLayout(group_step1)
+        self.group_step1 = QtWidgets.QGroupBox("1단계: KB전산 브라우저 열기")
+        step1_layout = QtWidgets.QVBoxLayout(self.group_step1)
         self.btn_open_edge = QtWidgets.QPushButton("🌐 Edge 브라우저 기동")
         self.btn_open_edge.setStyleSheet("background-color: #2563eb; color: white; padding: 8px; font-weight: bold;")
         self.btn_open_edge.clicked.connect(self.open_edge_browser)
         step1_layout.addWidget(self.btn_open_edge)
-        layout.addWidget(group_step1)
+        layout.addWidget(self.group_step1)
 
         # 2단계
-        group_step2 = QtWidgets.QGroupBox("2단계: 포털 자동 로그인")
-        step2_layout = QtWidgets.QVBoxLayout(group_step2)
+        self.group_step2 = QtWidgets.QGroupBox("2단계: 포털 자동 로그인")
+        step2_layout = QtWidgets.QVBoxLayout(self.group_step2)
         step2_form = QtWidgets.QFormLayout()
         
         self.input_login_id = QtWidgets.QLineEdit()
@@ -764,11 +776,15 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         self.btn_auto_login.setStyleSheet("background-color: #2563eb; color: white; padding: 8px; font-weight: bold;")
         self.btn_auto_login.clicked.connect(self.run_auto_login)
         step2_layout.addWidget(self.btn_auto_login)
-        layout.addWidget(group_step2)
+        layout.addWidget(self.group_step2)
 
         # 3단계
-        group_step3 = QtWidgets.QGroupBox("3단계: 엑셀 및 저장 설정")
-        step3_layout = QtWidgets.QVBoxLayout(group_step3)
+        self.group_step3 = QtWidgets.QGroupBox("3단계: 엑셀 및 저장 설정")
+        step3_layout = QtWidgets.QVBoxLayout(self.group_step3)
+
+        # 초기 단계별 흐름 제어 활성화 상태 세팅 (1단계만 켜고 2,3단계 잠금)
+        self.group_step2.setEnabled(False)
+        self.group_step3.setEnabled(False)
 
         # File Select
         file_layout = QtWidgets.QHBoxLayout()
@@ -848,7 +864,7 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         trigger_layout.addWidget(self.btn_run)
         trigger_layout.addWidget(self.btn_stop)
         step3_layout.addLayout(trigger_layout)
-        layout.addWidget(group_step3)
+        layout.addWidget(self.group_step3)
 
         # Progress bar
         self.progress_bar = QtWidgets.QProgressBar()
@@ -1047,6 +1063,93 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         sync_layout.addWidget(btn_load)
         sync_layout.addWidget(self.btn_save_server)
         main_layout.addLayout(sync_layout)
+
+    def init_guide_tab(self):
+        layout = QtWidgets.QVBoxLayout(self.tab_guide)
+        layout.setContentsMargins(15, 15, 15, 15)
+        layout.setSpacing(10)
+
+        # Sub-tab widget for guides
+        self.guide_tabs = QtWidgets.QTabWidget()
+        self.guide_tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #334155;
+                background-color: #1e293b;
+                border-radius: 8px;
+            }
+            QTabBar::tab {
+                background-color: #0f172a;
+                color: #94a3b8;
+                border: 1px solid #1e293b;
+                padding: 8px 16px;
+            }
+            QTabBar::tab:selected {
+                background-color: #1e293b;
+                color: #38bdf8;
+                border-color: #334155;
+            }
+        """)
+
+        # 1. User Manual Tab
+        tab_manual = QtWidgets.QWidget()
+        layout_manual = QtWidgets.QVBoxLayout(tab_manual)
+        self.txt_manual = QtWidgets.QTextBrowser()
+        self.txt_manual.setStyleSheet("background-color: #1e293b; color: white; border: none; font-family: 'Malgun Gothic'; font-size: 10pt;")
+        layout_manual.addWidget(self.txt_manual)
+        self.guide_tabs.addTab(tab_manual, "📋 사용설명서")
+
+        # 2. Setup Guide Tab
+        tab_setup = QtWidgets.QWidget()
+        layout_setup = QtWidgets.QVBoxLayout(tab_setup)
+        self.txt_setup = QtWidgets.QTextBrowser()
+        self.txt_setup.setStyleSheet("background-color: #1e293b; color: white; border: none; font-family: 'Malgun Gothic'; font-size: 10pt;")
+        layout_setup.addWidget(self.txt_setup)
+        self.guide_tabs.addTab(tab_setup, "⚙️ 사전세팅 가이드")
+
+        layout.addWidget(self.guide_tabs)
+        self.load_guides()
+
+    def load_guides(self):
+        import sys
+        from pathlib import Path
+        
+        # Determine base path (support both development and PyInstaller frozen modes)
+        if hasattr(sys, "_MEIPASS"):
+            base_dir = Path(sys._MEIPASS)
+        else:
+            base_dir = Path(__file__).parent.parent
+
+        paths_manual = [
+            base_dir / "docs" / "사용설명서.md",
+            Path("docs/사용설명서.md"),
+            Path("사용설명서.md"),
+        ]
+        paths_setup = [
+            base_dir / "docs" / "사전세팅가이드.md",
+            Path("docs/사전세팅가이드.md"),
+            Path("사전세팅가이드.md"),
+        ]
+
+        manual_content = "사용설명서 파일을 찾을 수 없습니다."
+        for p in paths_manual:
+            if p and p.exists():
+                try:
+                    manual_content = p.read_text(encoding="utf-8")
+                    break
+                except Exception:
+                    pass
+
+        setup_content = "사전세팅가이드 파일을 찾을 수 없습니다."
+        for p in paths_setup:
+            if p and p.exists():
+                try:
+                    setup_content = p.read_text(encoding="utf-8")
+                    break
+                except Exception:
+                    pass
+
+        self.txt_manual.setMarkdown(manual_content)
+        self.txt_setup.setMarkdown(setup_content)
 
     def connect_supabase(self):
         if not SUPABASE_URL or not SUPABASE_KEY:
@@ -1377,6 +1480,10 @@ class KkandoriAgent(QtWidgets.QMainWindow):
             cmd = 'start "" msedge.exe --remote-debugging-port=9222 --user-data-dir="%USERPROFILE%\\kb-edge-debug" "https://nsales.kbinsure.co.kr/eus/ch/ch_index.jsp"'
             subprocess.Popen(cmd, shell=True)
             self.log_message("[알림] Edge 브라우저를 디버그 포트 9222로 기동했습니다. (브라우저 창을 닫지 마세요)")
+            
+            # 1단계 성공 -> 2단계 잠금 해제
+            self.group_step2.setEnabled(True)
+            self.log_message("[안내] 1단계가 완료되었어요. 2단계 포털 자동 로그인을 진행해 주세요! 🔑")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "오류", f"Edge 브라우저 기동 실패: {e}")
         finally:
@@ -1408,8 +1515,12 @@ class KkandoriAgent(QtWidgets.QMainWindow):
                 self.save_credentials()
             else:
                 self.clear_credentials()
+            
+            # 2단계 성공 -> 3단계 잠금 해제
+            self.group_step3.setEnabled(True)
             QtWidgets.QMessageBox.information(self, "성공", msg)
             self.log_message("[알림] 포털 자동 로그인에 성공했습니다.")
+            self.log_message("[안내] 2단계가 완료되었어요. 3단계 파일 및 저장 폴더 설정을 마친 후 [깐돌이 자동 등록 시작]을 눌러주세요! 🚀")
         else:
             QtWidgets.QMessageBox.critical(self, "오류", msg)
             self.log_message(f"[오류] 자동 로그인 실패: {msg}")
@@ -1706,39 +1817,56 @@ class KkandoriAgent(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "경고", "최소 하나 이상의 가동 단계를 선택해야 합니다.")
             return
 
-        config = {
-            "stages": {
-                "solting": self.check_solting.isChecked(),
-                "insurance": self.check_insurance.isChecked()
-            },
-            "run": {
-                "output_folder": str(APP_DIR / "output"),
-                "retry_count": 1,
-                "retry_delay_sec": 2,
-                "row_delay_sec": 1.0
-            },
-            "insurance": {
-                "pdf_folder": self.input_pdf_folder.text().strip() or str(APP_DIR / "output" / "consent_pdfs"),
-                "pdf_stamped_folder": self.input_pdf_stamped_folder.text().strip() or str(APP_DIR / "output" / "consent_pdfs_stamped"),
-                "stamping_enabled": self.check_stamping.isChecked(),
-                "kb_scan_enabled": True,
-                "browser": {
-                    "mode": "attach",
-                    "cdp_url": "http://localhost:9222",
-                    "skip_login": True
+        # 기존 config.yaml에서 전체 설정을 먼저 안전하게 로드합니다.
+        try:
+            from solting_auto.config import load_config
+            config = load_config(str(APP_DIR / "config.yaml"))
+        except Exception as e:
+            config = {
+                "stages": {},
+                "run": {},
+                "insurance": {
+                    "browser": {},
+                    "oz": {}
                 },
-                "oz": {
-                    "file_format": self.combo_file_format.currentText()
-                }
-            },
-            "columns": {
-                "jumin": "주민번호",
-                "name": "성명",
-                "phone": "휴대폰"
-            },
-            "format": {
-                "jumin_checksum": False
+                "columns": {},
+                "format": {}
             }
+
+        # 동적 사용자 입력 값 및 상태들을 덮어씁니다.
+        config["stages"]["solting"] = self.check_solting.isChecked()
+        config["stages"]["insurance"] = self.check_insurance.isChecked()
+        
+        config["run"]["output_folder"] = str(APP_DIR / "output")
+        config["run"]["retry_count"] = 1
+        config["run"]["retry_delay_sec"] = 2
+        config["run"]["row_delay_sec"] = 1.0
+
+        if "insurance" not in config:
+            config["insurance"] = {}
+        
+        config["insurance"]["pdf_folder"] = self.input_pdf_folder.text().strip() or str(APP_DIR / "output" / "consent_pdfs")
+        config["insurance"]["pdf_stamped_folder"] = self.input_pdf_stamped_folder.text().strip() or str(APP_DIR / "output" / "consent_pdfs_stamped")
+        config["insurance"]["stamping_enabled"] = self.check_stamping.isChecked()
+        config["insurance"]["kb_scan_enabled"] = True
+        
+        if "browser" not in config["insurance"]:
+            config["insurance"]["browser"] = {}
+        config["insurance"]["browser"]["mode"] = "attach"
+        config["insurance"]["browser"]["cdp_url"] = "http://localhost:9222"
+        config["insurance"]["browser"]["skip_login"] = True
+
+        if "oz" not in config["insurance"]:
+            config["insurance"]["oz"] = {}
+        config["insurance"]["oz"]["file_format"] = self.combo_file_format.currentText()
+
+        config["columns"] = {
+            "jumin": "주민번호",
+            "name": "성명",
+            "phone": "휴대폰"
+        }
+        config["format"] = {
+            "jumin_checksum": False
         }
 
         # Override delays/offsets from PyQt inputs
@@ -1833,18 +1961,24 @@ class KkandoriAgent(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "경고", "업로드할 PDF 파일이 폴더에 없어요.")
             return
 
-        config = {
-            "run": {
-                "output_folder": str(APP_DIR / "output"),
-            },
-            "insurance": {
-                "offsets": {k: spin.value() for k, spin in self.offset_inputs.items()},
-                "delays": {k: spin.value() for k, spin in self.delay_inputs.items()},
-                "ratios": {
-                    "pop_send_x": 0.693989,
-                    "pop_send_y": 0.873817
-                }
+        # 기존 config.yaml에서 설정을 안전하게 로드합니다.
+        try:
+            from solting_auto.config import load_config
+            config = load_config(str(APP_DIR / "config.yaml"))
+        except Exception as e:
+            config = {
+                "run": {},
+                "insurance": {}
             }
+
+        config["run"]["output_folder"] = str(APP_DIR / "output")
+        if "insurance" not in config:
+            config["insurance"] = {}
+        config["insurance"]["offsets"] = {k: spin.value() for k, spin in self.offset_inputs.items()}
+        config["insurance"]["delays"] = {k: spin.value() for k, spin in self.delay_inputs.items()}
+        config["insurance"]["ratios"] = {
+            "pop_send_x": 0.693989,
+            "pop_send_y": 0.873817
         }
 
         self.btn_edms_run.setEnabled(False)
@@ -1883,6 +2017,8 @@ class KkandoriAgent(QtWidgets.QMainWindow):
             self.btn_edms_stop.setEnabled(False)
             self.btn_edms_stop.setText("중단 처리 중...")
             self.current_edms_worker.stop_requested = True
+            if hasattr(self.current_edms_worker, "active_auto") and self.current_edms_worker.active_auto:
+                self.current_edms_worker.active_auto.stop_requested = True
             
             try:
                 self.supabase.rpc("update_execution_log_status_via_device", {

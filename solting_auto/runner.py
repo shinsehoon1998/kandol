@@ -38,8 +38,10 @@ def _enabled_stages(config: dict) -> list:
 
 
 def process_file(xlsx_path: str, config: dict, logger, dry_run: bool = False,
-                 progress_cb=None) -> ReportSummary:
-    """progress_cb(done, total, last_result) - 행 처리마다 호출(웹 진행률용, 선택)."""
+                 progress_cb=None, stop_check_cb=None) -> ReportSummary:
+    """progress_cb(done, total, last_result) - 행 처리마다 호출(웹 진행률용, 선택).
+    stop_check_cb() - 중단 요청 여부를 반환하는 콜백 함수(선택).
+    """
     run = config["run"]
     columns = config["columns"]
     fmt = config.get("format", {})
@@ -75,6 +77,11 @@ def process_file(xlsx_path: str, config: dict, logger, dry_run: bool = False,
             engines = _start_engines(stages, config, logger)
 
         for rec in records:
+            # 중단 신호 체크
+            if stop_check_cb and stop_check_cb():
+                logger.info("작업 중단 신호가 감지되어 루프 처리를 중지합니다.")
+                raise RuntimeError("사용자 중단 요청")
+
             res = _process_row(rec, stages, engines, dedups, run, use_checksum,
                                shot_folder, logger, dry_run)
             summary.add(res)
@@ -87,7 +94,13 @@ def process_file(xlsx_path: str, config: dict, logger, dry_run: bool = False,
                 raise RuntimeError("4단계 (KB스캔) 전송 실패로 인해 작업을 일시정지(중단)합니다. 화면 및 로그를 확인한 후 다시 시도해 주세요.")
                 
             if not dry_run:
-                time.sleep(run.get("row_delay_sec", 1.0))
+                delay = run.get("row_delay_sec", 1.0)
+                slept = 0.0
+                while slept < delay:
+                    import solting_auto
+                    solting_auto.check_stop()
+                    time.sleep(0.1)
+                    slept += 0.1
 
         for d in dedups.values():
             d.save()

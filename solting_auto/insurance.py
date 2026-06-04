@@ -22,6 +22,17 @@ def _safe(s: str) -> str:
 
 
 class InsuranceAutomation:
+    @property
+    def stop_requested(self):
+        import solting_auto
+        if solting_auto.is_stop_requested():
+            return True
+        return getattr(self, "_stop_requested", False)
+
+    @stop_requested.setter
+    def stop_requested(self, val):
+        self._stop_requested = val
+
     def __init__(self, config: dict, logger):
         self.cfg = config
         self.ins = config["insurance"]
@@ -97,6 +108,9 @@ class InsuranceAutomation:
                 self._pw.stop()
 
     def login(self, username=None, password=None, birthdate=None, force=False):
+        import solting_auto
+        solting_auto.check_stop()
+
         browser = self.ins.get("browser", {})
         # attach 모드 + skip_login: 사용자가 이미 수동 로그인했다고 가정하고 건너뜀 (force=True인 경우 무시하고 진행)
         if browser.get("mode") == "attach" and browser.get("skip_login", True) and not force:
@@ -176,6 +190,9 @@ class InsuranceAutomation:
         self.log.info("KB 로그인 성공")
 
     def register_and_consent(self, jumin: str, name: str, phone: str) -> str:
+        import solting_auto
+        solting_auto.check_stop()
+
         dialog = self._open_consent_dialog()
 
         try:
@@ -196,6 +213,9 @@ class InsuranceAutomation:
 
     def _open_consent_dialog(self):
         """좌측 '동의서 출력' 메뉴를 눌러 팝업/모달을 연다. 작업 대상 page/frame 반환."""
+        import solting_auto
+        solting_auto.check_stop()
+
         menu = self.sel["consent"].get("menu")
         
         # 1) 기존에 열려 있는 모달이 있다면 닫아서 상태를 리셋합니다.
@@ -334,6 +354,9 @@ class InsuranceAutomation:
             self.log.warning(f"모달 닫기 중 오류: {e}")
 
     def _print_and_capture(self, dialog, name, phone, jumin) -> str:
+        import solting_auto
+        solting_auto.check_stop()
+
         self.pdf_dir.mkdir(parents=True, exist_ok=True)
         suffix = (normalize_phone(phone)[-4:] if normalize_phone(phone)
                   else normalize_digits(jumin)[:6])
@@ -391,7 +414,12 @@ class InsuranceAutomation:
         dialog.on("response", on_response) if dialog is not self.page else None
         try:
             self._click_print_btn(dialog, print_btn)
-            dialog.wait_for_timeout(min(timeout, 8000))
+            t_left = min(timeout, 8000)
+            while t_left > 0:
+                solting_auto.check_stop()
+                chunk = min(t_left, 500)
+                dialog.wait_for_timeout(chunk)
+                t_left -= chunk
         finally:
             try:
                 self.page.remove_listener("response", on_response)
@@ -483,6 +511,9 @@ class InsuranceAutomation:
     # --- 자가 치유형 (Self-healing) 자동 입력/클릭 헬퍼 ---
     def _fill_smart(self, target, selector, value, field_type):
         """자가 치유형 입력 필러. 셀렉터가 실패하거나 다른 프레임에 있으면 스캔하여 사람처럼 한글자씩 입력합니다."""
+        import solting_auto
+        solting_auto.check_stop()
+
         # 0) 마우스 클릭을 방해하는 웹스퀘어 로딩 디머 레이어를 강제로 숨김 (display = 'none')
         try:
             self.page.evaluate("""() => {
@@ -649,6 +680,9 @@ class InsuranceAutomation:
 
     def _click_smart(self, target, selector, action_name):
         """자가 치유형 클릭커. 셀렉터가 실패하면 모든 프레임에서 매칭 텍스트 및 요소를 기반으로 클릭합니다."""
+        import solting_auto
+        solting_auto.check_stop()
+
         if selector:
             frames_to_search = [self.page] + list(self.page.frames)
             for f in frames_to_search:
@@ -771,6 +805,9 @@ class InsuranceAutomation:
 
     def upload_to_kb_scan(self, stamped_pdf_path: str) -> bool:
         """4단계: 서명/스탬프 작업을 마친 동의서를 KB EDMS 스캔 시스템에 자동 전송합니다."""
+        import solting_auto
+        solting_auto.check_stop()
+
         self.log.info("4단계: KB스캔 자동 업로드/전송을 시작합니다.")
         import os
         import shutil

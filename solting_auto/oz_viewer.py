@@ -110,6 +110,9 @@ def _find_oz_window(oz_cfg, logger):
     deadline = time.time() + timeout
     desktop = Desktop(backend="uia")
     while time.time() < deadline:
+        import solting_auto
+        solting_auto.check_stop()
+
         for w in desktop.windows():
             try:
                 title = w.window_text() or ""
@@ -272,6 +275,8 @@ def _wait_dialog(Desktop, titles, timeout, parent_win=None):
     deadline = time.time() + timeout
     desktop = Desktop(backend="uia")
     while time.time() < deadline:
+        import solting_auto
+        solting_auto.check_stop()
         # 1) 데스크톱 최상위 윈도우 검색
         for w in desktop.windows():
             try:
@@ -316,6 +321,9 @@ def _click_button(dlg, names):
 def _verify(dest: Path) -> str:
     deadline = time.time() + 10
     while time.time() < deadline:
+        import solting_auto
+        solting_auto.check_stop()
+
         if dest.exists() and dest.stat().st_size > 0:
             return str(dest)
         time.sleep(0.5)
