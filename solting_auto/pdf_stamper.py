@@ -2,6 +2,37 @@ import os
 import random
 import fitz  # PyMuPDF
 
+def split_pdf(input_path: str, output_paths: list, logger) -> bool:
+    """다중 입력으로 생성된 통합 PDF 동의서를 각 고객별 3페이지씩 분할하여 개별 파일로 저장합니다."""
+    try:
+        if not os.path.exists(input_path):
+            logger.error(f"분할할 원본 통합 PDF 파일이 존재하지 않습니다: {input_path}")
+            return False
+
+        doc = fitz.open(input_path)
+        num_pages = len(doc)
+        
+        for idx, out_path in enumerate(output_paths):
+            start_page = idx * 3
+            end_page = start_page + 3
+            
+            if start_page >= num_pages:
+                logger.warning(f"페이지 범위 초과로 분할을 조기 종료합니다. (현재 페이지: {start_page}, 총 페이지: {num_pages})")
+                break
+                
+            new_doc = fitz.open()
+            new_doc.insert_pdf(doc, from_page=start_page, to_page=min(end_page - 1, num_pages - 1))
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            new_doc.save(out_path)
+            new_doc.close()
+            logger.info(f"개별 PDF 분할 완료: {os.path.basename(out_path)}")
+            
+        doc.close()
+        return True
+    except Exception as e:
+        logger.error(f"PDF 분할 중 예외 발생: {e}")
+        return False
+
 def stamp_single_pdf(input_path: str, output_path: str, logger) -> bool:
     """다운로드받은 동의서 PDF 파일에 동의함 체크표시 및 서명을 주입하여 다른 폴더에 저장합니다."""
     try:

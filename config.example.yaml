@@ -91,6 +91,11 @@ insurance:
       info_output_input: "text=입력"        # 고객정보출력여부=입력 라디오
       single_input: "text=단독입력"          # 고객인적사항=단독입력 라디오
       print_btn: "[id*='btnCnfm00']"                # 출력 버튼 (진단 스캔 기반 정밀 ID)
+      multi_input: "text=다중입력"           # 다중입력 라디오 버튼
+      multi_name_format: "[id*='iptCustNm_{i}']"    # 다중입력 테이블 성명 행 셀렉터 (인덱스 동적 바인딩)
+      multi_jumin_format: "[id*='iptCustIdno_{i}']"  # 다중입력 테이블 주민번호 행 셀렉터 (인덱스 동적 바인딩)
+      duplicate_modal: "div.popup_confirm"          # 중복 경고 모달 레이어
+      duplicate_no_btn: "button:has-text('아니오')"  # 중복 모달 내 '아니오' 버튼
 
   # 동의서 출력 팝업 형태: "modal"(같은 페이지) | "window"(새 창)
   popup_mode: "window"

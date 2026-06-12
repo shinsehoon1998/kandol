@@ -20,6 +20,10 @@ class RetryableError(Exception):
     """네트워크/요소 타임아웃 등 재시도 가능한 오류."""
 
 
+class DuplicateCustomerError(Exception):
+    """최근 2개월 이내 중복 등록 이력 존재로 스킵하는 오류."""
+
+
 class SoltingAutomation:
     def __init__(self, config: dict, logger):
         self.cfg = config

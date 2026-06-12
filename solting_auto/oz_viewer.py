@@ -31,9 +31,18 @@ class OzError(Exception):
     pass
 
 
-def save_as_pdf(dest_path: str, oz_cfg: dict, logger) -> str:
-    """OZ 뷰어에 떠 있는 보고서를 dest_path 로 PDF 저장. 성공 시 경로 반환."""
+def save_as_pdf(dest_path: str, oz_cfg: dict, logger, file_format=None) -> str:
+    """OZ 뷰어에 떠 있는 보고서를 dest_path 로 PDF/PNG 저장. 성공 시 경로 반환."""
+    actual_format = file_format or oz_cfg.get("file_format", "PDF")
+    if "PNG" in actual_format.upper():
+        actual_format = "PNG"
+    elif "PDF" in actual_format.upper():
+        actual_format = "PDF"
+        
     method = oz_cfg.get("method", "print_to_pdf")
+    if actual_format == "PNG":
+        method = "save_as"
+
     dest = Path(dest_path)
     dest.parent.mkdir(parents=True, exist_ok=True)
 
@@ -46,7 +55,7 @@ def save_as_pdf(dest_path: str, oz_cfg: dict, logger) -> str:
 
     try:
         if method == "save_as":
-            res_path = _save_via_viewer(oz_win, dest, oz_cfg, logger, send_keys, Desktop)
+            res_path = _save_via_viewer(oz_win, dest, oz_cfg, logger, send_keys, Desktop, file_format=actual_format)
         else:
             res_path = _print_to_pdf(oz_win, dest, oz_cfg, logger, send_keys, Desktop)
         return res_path
@@ -166,7 +175,7 @@ def _print_to_pdf(oz_win, dest: Path, oz_cfg, logger, send_keys, Desktop):
     return _verify(dest)
 
 
-def _save_via_viewer(oz_win, dest: Path, oz_cfg, logger, send_keys, Desktop):
+def _save_via_viewer(oz_win, dest: Path, oz_cfg, logger, send_keys, Desktop, file_format=None):
     """OZ 뷰어 자체 '저장' 기능으로 PDF/Excel 등 파일로 저장."""
     send_keys("^s")
     logger.info("저장 설정 대화상자 호출 (Ctrl+S)")
@@ -176,14 +185,14 @@ def _save_via_viewer(oz_win, dest: Path, oz_cfg, logger, send_keys, Desktop):
     if not dlg:
         raise OzError("OZ 저장 설정 대화상자를 찾지 못했습니다.")
     
-    file_format = oz_cfg.get("file_format", "PDF")
-    logger.info(f"저장 설정 시작 (파일 형식: {file_format}, 출력 방향: Disk File)")
+    actual_fmt = file_format or oz_cfg.get("file_format", "PDF")
+    logger.info(f"저장 설정 시작 (파일 형식: {actual_fmt}, 출력 방향: Disk File)")
 
     # 1) 파일 형식 콤보박스(AutoID: 1205) 선택
     try:
         format_combo = dlg.child_window(auto_id="1205", control_type="ComboBox")
-        if not _select_combo_item(format_combo, file_format, logger):
-            logger.warning(f"파일 형식 콤보박스(1205)에서 '{file_format}' 매칭 선택 실패 (기본값 신뢰)")
+        if not _select_combo_item(format_combo, actual_fmt, logger):
+            logger.warning(f"파일 형식 콤보박스(1205)에서 '{actual_fmt}' 매칭 선택 실패 (기본값 신뢰)")
     except Exception as e:
         logger.warning(f"파일 형식 콤보박스(1205) 접근 실패: {e}")
 
@@ -320,14 +329,21 @@ def _click_button(dlg, names):
 
 def _verify(dest: Path) -> str:
     deadline = time.time() + 10
+    is_png = dest.suffix.lower() == ".png"
     while time.time() < deadline:
         import solting_auto
         solting_auto.check_stop()
 
-        if dest.exists() and dest.stat().st_size > 0:
-            return str(dest)
+        if is_png:
+            first_page = dest.parent / f"{dest.stem}_1.png"
+            if first_page.exists() and first_page.stat().st_size > 0:
+                return str(dest)
+        else:
+            if dest.exists() and dest.stat().st_size > 0:
+                return str(dest)
         time.sleep(0.5)
-    raise OzError(f"PDF 파일이 생성되지 않았습니다: {dest}")
+    typename = "이미지" if is_png else "PDF"
+    raise OzError(f"{typename} 파일이 생성되지 않았습니다: {dest}")
 
 
 def _check_print_to_file(print_dlg, logger):

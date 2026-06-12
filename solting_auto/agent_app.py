@@ -802,6 +802,7 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         self.combo_file_format = QtWidgets.QComboBox()
         self.combo_file_format.addItems([
             "Adobe PDF File(*.pdf)",
+            "PNG Image File(*.png)",
             "Microsoft Excel File(*.xlsx)",
             "Microsoft Excel 97-2003 File(*.xls)",
             "Web Page(*.html)",
@@ -810,6 +811,15 @@ class KkandoriAgent(QtWidgets.QMainWindow):
             "Hangul File(*.hwp)",
             "OZ Report Data File(*.ozd)"
         ])
+        
+        # 입력 방식 라디오 버튼
+        self.radio_input_single = QtWidgets.QRadioButton("단일입력 (1명씩)")
+        self.radio_input_batch = QtWidgets.QRadioButton("다중입력 (10명 일괄)")
+        self.radio_input_single.setChecked(True)
+        
+        input_mode_layout = QtWidgets.QHBoxLayout()
+        input_mode_layout.addWidget(self.radio_input_single)
+        input_mode_layout.addWidget(self.radio_input_batch)
         
         pdf_folder_lay = QtWidgets.QHBoxLayout()
         self.input_pdf_folder = QtWidgets.QLineEdit()
@@ -828,6 +838,7 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         stamped_folder_lay.addWidget(btn_stamped_browse)
 
         folders_form.addRow("동의서 형식:", self.combo_file_format)
+        folders_form.addRow("입력 방식:", input_mode_layout)
         folders_form.addRow("원본 폴더:", pdf_folder_lay)
         folders_form.addRow("완료 폴더:", stamped_folder_lay)
         step3_layout.addLayout(folders_form)
@@ -1605,9 +1616,18 @@ class KkandoriAgent(QtWidgets.QMainWindow):
             self.input_pdf_stamped_folder.setText(str(Path(pdf_stamped_folder).resolve()))
             self.check_stamping.setChecked(stamping_enabled)
             
+            # 입력 방식 로드
+            input_mode = cfg.get("insurance", {}).get("input_mode", "single")
+            if input_mode == "batch":
+                self.radio_input_batch.setChecked(True)
+            else:
+                self.radio_input_single.setChecked(True)
+            
             shorthand_map = {
                 "PDF": "Adobe PDF File(*.pdf)",
                 "Adobe PDF File(*.pdf)": "Adobe PDF File(*.pdf)",
+                "PNG": "PNG Image File(*.png)",
+                "PNG Image File(*.png)": "PNG Image File(*.png)",
                 "Excel": "Microsoft Excel File(*.xlsx)",
                 "Microsoft Excel File(*.xlsx)": "Microsoft Excel File(*.xlsx)",
                 "xls": "Microsoft Excel 97-2003 File(*.xls)",
@@ -1859,6 +1879,7 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         if "oz" not in config["insurance"]:
             config["insurance"]["oz"] = {}
         config["insurance"]["oz"]["file_format"] = self.combo_file_format.currentText()
+        config["insurance"]["input_mode"] = "batch" if self.radio_input_batch.isChecked() else "single"
 
         config["columns"] = {
             "jumin": "주민번호",
@@ -1876,6 +1897,16 @@ class KkandoriAgent(QtWidgets.QMainWindow):
             "pop_send_x": 0.693989,
             "pop_send_y": 0.873817
         }
+
+        # config.yaml에 최종 설정 보존 기록
+        try:
+            config_path = APP_DIR / "config.yaml"
+            import yaml
+            with open(config_path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(config, f, default_flow_style=False, allow_unicode=True)
+            self.log_message("[설정] config.yaml 파일에 실행 옵션을 보존했습니다.")
+        except Exception as save_err:
+            print(f"config.yaml 저장 중 오류: {save_err}")
 
         self.btn_run.setEnabled(False)
         self.btn_run.setText("구동 중...")

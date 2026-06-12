@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 from .validators import normalize_phone, normalize_digits
-from .automation import RegisterError, RetryableError
+from .automation import RegisterError, RetryableError, DuplicateCustomerError
 
 
 def _safe(s: str) -> str:
@@ -200,16 +200,291 @@ class InsuranceAutomation:
             self._fill_smart(dialog, self.sel["consent"].get("jumin"), self._fmt_jumin(jumin), "주민번호")
             self._fill_smart(dialog, self.sel["consent"].get("name"), str(name), "이름")
             
+            # 입력 후 1.0초 이내에 중복 팝업이 뜨는지 감지
+            is_dup = False
+            for _ in range(5):
+                solting_auto.check_stop()
+                if self._check_duplicate_popup(dialog):
+                    is_dup = True
+                    break
+                time.sleep(0.2)
+                
+            if is_dup:
+                self.log.info(f"[{name}] 최근 2개월 이내 입력 이력이 존재하여 등록을 건너뜁니다.")
+                raise DuplicateCustomerError("최근 등록 이력 존재(2개월 이내)")
+
             # 옵션(가입설계 체크 / 입력 / 단독입력) - 이미 기본값이면 실패해도 무시
             self._try_check(dialog, self.sel["consent"].get("agree_check"))
             self._try_click_on(dialog, self.sel["consent"].get("info_output_input"))
             self._try_click_on(dialog, self.sel["consent"].get("single_input"))
 
-            # 출력 + PDF 캡처
+            # 출력 + PDF/PNG 캡처
             res_path = self._print_and_capture(dialog, name, phone, jumin)
             return res_path
         finally:
             self._close_consent_dialog(dialog)
+
+    def register_and_consent_batch(self, batch_records: list, file_format: str = None) -> list:
+        """다중입력 모드로 여러 고객(최대 10명)을 일괄 입력 및 출력 처리합니다.
+        batch_records: [{'jumin': '...', 'name': '...', 'phone': '...', 'row_no': ...}, ...]
+        file_format: 'PDF' 또는 'PNG'
+        """
+        import solting_auto
+        solting_auto.check_stop()
+
+        dialog = self._open_consent_dialog()
+        results = []
+        registered_records = []
+        
+        try:
+            # 1) '다중입력' 라디오 버튼 클릭
+            self.log.info("입력 방식을 '다중입력'으로 변경합니다.")
+            self._try_click_on(dialog, self.sel["consent"].get("multi_input", "text=다중입력"))
+            time.sleep(0.5)
+
+            # 2) '고객정보출력여부=입력' 라디오 버튼 클릭
+            self._try_click_on(dialog, self.sel["consent"].get("info_output_input", "text=입력"))
+            time.sleep(0.3)
+            
+            # 3) 각 레코드 입력 처리
+            for i, rec in enumerate(batch_records):
+                solting_auto.check_stop()
+                
+                # 셀렉터 포맷팅
+                jumin_sel = self.sel["consent"].get("multi_jumin_format", "[id*='iptCustIdno_{i}']").replace("{i}", str(i))
+                name_sel = self.sel["consent"].get("multi_name_format", "[id*='iptCustNm_{i}']").replace("{i}", str(i))
+                
+                self.log.info(f"[{rec['name']}] 다중입력 슬롯 {i}번에 입력 중...")
+                
+                # 입력 실행
+                self._fill_smart(dialog, jumin_sel, self._fmt_jumin(rec['jumin']), f"주민번호 {i}")
+                self._fill_smart(dialog, name_sel, str(rec['name']), f"이름 {i}")
+                
+                # 중복 팝업 실시간 감지 (1초 대기하며 감지)
+                is_dup = False
+                for _ in range(5):
+                    solting_auto.check_stop()
+                    if self._check_duplicate_popup(dialog):
+                        is_dup = True
+                        break
+                    time.sleep(0.2)
+                    
+                if is_dup:
+                    self.log.info(f"[{rec['name']}] 중복 경고 모달 감지됨. 이 레코드는 건너뜁니다.")
+                    # 입력했던 슬롯 비우기
+                    self._clear_input(dialog, name_sel)
+                    self._clear_input(dialog, jumin_sel)
+                    results.append({
+                        "row_no": rec["row_no"],
+                        "jumin": rec["jumin"],
+                        "name": rec["name"],
+                        "phone": rec["phone"],
+                        "status": SKIP,
+                        "reason": "최근 등록 이력 존재(2개월 이내)",
+                        "pdf_path": ""
+                    })
+                else:
+                    # 체크박스 선택 (chkGrid_i)
+                    chk_sel = f"[id*='chkGrid_{i}']"
+                    self._try_check(dialog, chk_sel)
+                    
+                    registered_records.append(rec)
+                    results.append({
+                        "row_no": rec["row_no"],
+                        "jumin": rec["jumin"],
+                        "name": rec["name"],
+                        "phone": rec["phone"],
+                        "status": SUCCESS,
+                        "pdf_path": ""  # 캡처 완료 후 채워짐
+                    })
+
+            solting_auto.check_stop()
+            
+            if not registered_records:
+                self.log.info("이번 배치에서 등록할 수 있는 고객이 없습니다. 출력을 건너뜁니다.")
+                return results
+
+            # 4) 일괄 출력 및 캡처
+            actual_format = file_format or self.ins.get("oz", {}).get("file_format", "PDF")
+            ext = ".png" if "PNG" in actual_format.upper() else ".pdf"
+            
+            batch_id = int(time.time())
+            temp_dest = self.pdf_dir / f"batch_temp_{batch_id}{ext}"
+            
+            self.log.info(f"등록 성공 고객 {len(registered_records)}명에 대한 일괄 출력 및 저장 시작 (형식: {actual_format})")
+            
+            print_btn = self.sel["consent"].get("print_btn")
+            
+            if self.capture_mode == "oz_windows":
+                from . import oz_viewer
+                try:
+                    self._click_print_btn(dialog, print_btn)
+                except Exception as e:
+                    raise RetryableError(f"'출력' 버튼 클릭 실패: {e}")
+                try:
+                    path = oz_viewer.save_as_pdf(str(temp_dest), self.ins.get("oz", {}), self.log, file_format=actual_format)
+                except Exception as e:
+                    raise RetryableError(f"OZ 뷰어 일괄 {actual_format} 저장 실패: {e}")
+            else:
+                raise RegisterError("다중입력 모드는 OZ Windows 저장 모드(oz_windows)만 지원합니다.")
+
+            # 5) 생성된 파일 검증 및 개별 분할 저장
+            if "PNG" in actual_format.upper():
+                total_pages = len(registered_records) * 3
+                self.log.info(f"일괄 출력 이미지 파일들을 개별 고객(인당 3장)으로 매핑합니다. 총 예상 페이지: {total_pages}장")
+                
+                reg_idx = 0
+                for r_item in results:
+                    if r_item["status"] == SUCCESS:
+                        name = r_item["name"]
+                        phone = r_item["phone"]
+                        jumin = r_item["jumin"]
+                        suffix = (normalize_phone(phone)[-4:] if normalize_phone(phone)
+                                  else normalize_digits(jumin)[:6])
+                        
+                        cust_base = self.pdf_dir / f"동의서_{_safe(name)}_{suffix}.png"
+                        
+                        src_pages = [
+                            self.pdf_dir / f"{temp_dest.stem}_{3 * reg_idx + 1}.png",
+                            self.pdf_dir / f"{temp_dest.stem}_{3 * reg_idx + 2}.png",
+                            self.pdf_dir / f"{temp_dest.stem}_{3 * reg_idx + 3}.png"
+                        ]
+                        
+                        dest_pages = [
+                            self.pdf_dir / f"동의서_{_safe(name)}_{suffix}_1.png",
+                            self.pdf_dir / f"동의서_{_safe(name)}_{suffix}_2.png",
+                            self.pdf_dir / f"동의서_{_safe(name)}_{suffix}_3.png"
+                        ]
+                        
+                        missing = []
+                        for src_p in src_pages:
+                            if not src_p.exists():
+                                missing.append(src_p.name)
+                                
+                        if missing:
+                            self.log.error(f"[{name}] 이미지 파일 누락 감지: {missing}")
+                            r_item["status"] = FAIL
+                            r_item["reason"] = f"출력 이미지 파일 누락: {', '.join(missing)}"
+                        else:
+                            import shutil
+                            for src_p, dest_p in zip(src_pages, dest_pages):
+                                shutil.copy2(src_p, dest_p)
+                                try:
+                                    src_p.unlink()
+                                except:
+                                    pass
+                            
+                            r_item["pdf_path"] = str(cust_base)
+                            self.log.info(f"[{name}] 개별 이미지 3장 매핑 완료: {cust_base.name}")
+                            
+                        reg_idx += 1
+            else:
+                temp_pdf = Path(path)
+                if not temp_pdf.exists():
+                    raise RegisterError(f"일괄 출력 PDF 파일이 생성되지 않았습니다: {temp_dest}")
+                
+                import fitz
+                doc = fitz.open(temp_pdf)
+                num_pages = len(doc)
+                doc.close()
+                
+                expected_pages = len(registered_records) * 3
+                self.log.info(f"일괄 출력 PDF ({num_pages}페이지)를 개별 고객(인당 3페이지)으로 분할합니다. 예상: {expected_pages}페이지")
+                
+                reg_idx = 0
+                for r_item in results:
+                    if r_item["status"] == SUCCESS:
+                        name = r_item["name"]
+                        phone = r_item["phone"]
+                        jumin = r_item["jumin"]
+                        suffix = (normalize_phone(phone)[-4:] if normalize_phone(phone)
+                                  else normalize_digits(jumin)[:6])
+                        
+                        cust_dest = self.pdf_dir / f"동의서_{_safe(name)}_{suffix}.pdf"
+                        
+                        start_page = reg_idx * 3
+                        end_page = start_page + 3
+                        
+                        if start_page < num_pages:
+                            doc_all = fitz.open(temp_pdf)
+                            new_doc = fitz.open()
+                            new_doc.insert_pdf(doc_all, from_page=start_page, to_page=min(end_page - 1, num_pages - 1))
+                            new_doc.save(str(cust_dest))
+                            new_doc.close()
+                            doc_all.close()
+                            
+                            r_item["pdf_path"] = str(cust_dest)
+                            self.log.info(f"[{name}] PDF 분할 완료: {cust_dest.name}")
+                        else:
+                            r_item["status"] = FAIL
+                            r_item["reason"] = "출력 PDF 내 페이지 부족"
+                            
+                        reg_idx += 1
+                        
+                try:
+                    temp_pdf.unlink()
+                except:
+                    pass
+            
+            return results
+            
+        finally:
+            self._close_consent_dialog(dialog)
+
+    def _check_duplicate_popup(self, dialog) -> bool:
+        """최근 2개월 이내 입력 이력이 있는 중복 고객 팝업이 뜨는지 감지하고, '아니오'를 눌러 닫습니다."""
+        modal_sel = self.sel["consent"].get("duplicate_modal", "div.popup_confirm")
+        no_btn_sel = self.sel["consent"].get("duplicate_no_btn", "button:has-text('아니오')")
+        
+        if not modal_sel:
+            return False
+            
+        frames_to_search = [self.page] + list(self.page.frames)
+        for f in frames_to_search:
+            try:
+                loc = f.locator(modal_sel)
+                if loc.count() > 0 and loc.first.is_visible():
+                    text = (loc.first.inner_text() or "").strip()
+                    self.log.info(f"[중복 감지] 모달 발견! 텍스트: {text}")
+                    
+                    no_btn = f.locator(no_btn_sel)
+                    if no_btn.count() > 0 and no_btn.first.is_visible():
+                        self.log.info("[중복 감지] '아니오' 버튼 클릭하여 팝업을 닫습니다.")
+                        no_btn.first.click(force=True)
+                        time.sleep(1.0)
+                        return True
+                    else:
+                        self.log.warning("[중복 감지] 지정된 셀렉터로 '아니오' 버튼을 찾지 못해 텍스트 매칭으로 재시도합니다.")
+                        for alt_btn in ["button:has-text('아니오')", "a:has-text('아니오')", "input[value='아니오']", "text='아니오'"]:
+                            btn_loc = f.locator(alt_btn)
+                            if btn_loc.count() > 0 and btn_loc.first.is_visible():
+                                btn_loc.first.click(force=True)
+                                time.sleep(1.0)
+                                return True
+            except Exception:
+                continue
+        return False
+
+    def _clear_input(self, dialog, selector):
+        if not selector:
+            return
+        frames_to_search = [self.page] + list(self.page.frames)
+        for f in frames_to_search:
+            try:
+                loc = f.locator(selector)
+                if loc.count() > 0 and loc.first.is_visible():
+                    loc.first.click(force=True, timeout=500)
+                    loc.first.evaluate("el => el.focus()")
+                    loc.first.press("Control+A")
+                    loc.first.press("Backspace")
+                    loc.first.evaluate("""e => {
+                        e.blur();
+                        e.dispatchEvent(new Event('change', { bubbles: true }));
+                        e.dispatchEvent(new Event('input', { bubbles: true }));
+                    }""")
+                    return
+            except Exception:
+                continue
 
     def _open_consent_dialog(self):
         """좌측 '동의서 출력' 메뉴를 눌러 팝업/모달을 연다. 작업 대상 page/frame 반환."""
@@ -353,14 +628,18 @@ class InsuranceAutomation:
         except Exception as e:
             self.log.warning(f"모달 닫기 중 오류: {e}")
 
-    def _print_and_capture(self, dialog, name, phone, jumin) -> str:
+    def _print_and_capture(self, dialog, name, phone, jumin, file_format=None) -> str:
         import solting_auto
         solting_auto.check_stop()
 
         self.pdf_dir.mkdir(parents=True, exist_ok=True)
         suffix = (normalize_phone(phone)[-4:] if normalize_phone(phone)
                   else normalize_digits(jumin)[:6])
-        dest = self.pdf_dir / f"동의서_{_safe(name)}_{suffix}.pdf"
+        
+        # 파일 형식 파악 및 확장자 매칭
+        actual_format = file_format or self.ins.get("oz", {}).get("file_format", "PDF")
+        ext = ".png" if "PNG" in actual_format.upper() else ".pdf"
+        dest = self.pdf_dir / f"동의서_{_safe(name)}_{suffix}{ext}"
         print_btn = self.sel["consent"].get("print_btn")
         timeout = self.run.get("element_timeout_ms", 10000)
 
@@ -371,9 +650,9 @@ class InsuranceAutomation:
             except Exception as e:
                 raise RetryableError(f"'출력' 버튼 클릭 실패: {e}")
             try:
-                path = oz_viewer.save_as_pdf(str(dest), self.ins.get("oz", {}), self.log)
+                path = oz_viewer.save_as_pdf(str(dest), self.ins.get("oz", {}), self.log, file_format=actual_format)
             except Exception as e:
-                raise RetryableError(f"OZ 뷰어 PDF 저장 실패: {e}")
+                raise RetryableError(f"OZ 뷰어 저장 실패: {e}")
             return self._verify(Path(path))
 
         if self.capture_mode == "download":
@@ -445,8 +724,14 @@ class InsuranceAutomation:
         return self._verify(dest)
 
     def _verify(self, dest: Path) -> str:
-        if not dest.exists() or dest.stat().st_size == 0:
-            raise RetryableError("동의서 PDF가 저장되지 않았습니다.")
+        is_png = dest.suffix.lower() == ".png"
+        if is_png:
+            first_page = dest.parent / f"{dest.stem}_1.png"
+            if not first_page.exists() or first_page.stat().st_size == 0:
+                raise RetryableError("동의서 PNG 이미지 파일이 저장되지 않았습니다.")
+        else:
+            if not dest.exists() or dest.stat().st_size == 0:
+                raise RetryableError("동의서 PDF가 저장되지 않았습니다.")
         return str(dest)
 
     def screenshot(self, path: str) -> str:

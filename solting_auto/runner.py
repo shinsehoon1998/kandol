@@ -76,31 +76,108 @@ def process_file(xlsx_path: str, config: dict, logger, dry_run: bool = False,
         if not dry_run:
             engines = _start_engines(stages, config, logger)
 
-        for rec in records:
-            # 중단 신호 체크
-            if stop_check_cb and stop_check_cb():
-                logger.info("작업 중단 신호가 감지되어 루프 처리를 중지합니다.")
-                raise RuntimeError("사용자 중단 요청")
+        input_mode = config.get("insurance", {}).get("input_mode", "single")
+        if input_mode == "batch" and STAGE_INSURANCE in stages:
+            logger.info("다중입력(배치) 모드로 동의서 등록 프로세스를 수행합니다.")
+            current_chunk = []
+            for rec in records:
+                if stop_check_cb and stop_check_cb():
+                    logger.info("작업 중단 신호가 감지되어 루프 처리를 중지합니다.")
+                    raise RuntimeError("사용자 중단 요청")
 
-            res = _process_row(rec, stages, engines, dedups, run, use_checksum,
-                               shot_folder, logger, dry_run)
-            summary.add(res)
-            if progress_cb:
-                progress_cb(summary.total, len(records), res)
-                
-            # [수정] 4단계 (KB스캔) 전송 실패 시, 다음 작업을 즉시 일시정지(중단)합니다.
-            if res.kb_scan_status == FAIL:
-                logger.error(f"[{rec.row_no}행] 4단계 (KB스캔) 전송 실패로 인해 전체 작업을 일시정지(중단)합니다.")
-                raise RuntimeError("4단계 (KB스캔) 전송 실패로 인해 작업을 일시정지(중단)합니다. 화면 및 로그를 확인한 후 다시 시도해 주세요.")
-                
-            if not dry_run:
-                delay = run.get("row_delay_sec", 1.0)
-                slept = 0.0
-                while slept < delay:
-                    import solting_auto
-                    solting_auto.check_stop()
-                    time.sleep(0.1)
-                    slept += 0.1
+                # 검증 및 중복 체크 선행
+                valid = True
+                reason = ""
+                for check in (
+                    validators.validate_jumin(rec.jumin, use_checksum),
+                    validators.validate_name(rec.name),
+                    validators.validate_phone(rec.phone),
+                ):
+                    if not check.ok:
+                        valid = False
+                        reason = check.reason
+                        break
+
+                if not valid:
+                    ts = _now()
+                    r = RowResult(
+                        row_no=rec.row_no, jumin=rec.jumin, name=rec.name, phone=rec.phone,
+                        status=SKIP, timestamp=ts, reason=reason
+                    )
+                    for st in stages:
+                        _set_stage(r, st, SKIP, reason)
+                    summary.add(r)
+                    if progress_cb:
+                        progress_cb(summary.total, len(records), r)
+                    continue
+
+                is_dup = False
+                for st in stages:
+                    dedup = dedups[st]
+                    if dedup.is_duplicate(rec.phone):
+                        is_dup = True
+                        reason = "전화번호 중복"
+                        dedup.mark_seen(rec.phone)
+                        break
+
+                if is_dup:
+                    ts = _now()
+                    r = RowResult(
+                        row_no=rec.row_no, jumin=rec.jumin, name=rec.name, phone=rec.phone,
+                        status=SKIP, timestamp=ts, reason=reason
+                    )
+                    for st in stages:
+                        _set_stage(r, st, SKIP, reason)
+                    summary.add(r)
+                    if progress_cb:
+                        progress_cb(summary.total, len(records), r)
+                    continue
+
+                for st in stages:
+                    dedups[st].mark_seen(rec.phone)
+
+                current_chunk.append(rec)
+
+                if len(current_chunk) == 10:
+                    _process_chunk(current_chunk, stages, engines, dedups, run, shot_folder, logger, dry_run, config, summary, progress_cb, len(records))
+                    current_chunk = []
+                    if not dry_run:
+                        delay = run.get("row_delay_sec", 1.0)
+                        slept = 0.0
+                        while slept < delay:
+                            import solting_auto
+                            solting_auto.check_stop()
+                            time.sleep(0.1)
+                            slept += 0.1
+
+            if current_chunk:
+                _process_chunk(current_chunk, stages, engines, dedups, run, shot_folder, logger, dry_run, config, summary, progress_cb, len(records))
+
+        else:
+            for rec in records:
+                if stop_check_cb and stop_check_cb():
+                    logger.info("작업 중단 신호가 감지되어 루프 처리를 중지합니다.")
+                    raise RuntimeError("사용자 중단 요청")
+
+                res = _process_row(rec, stages, engines, dedups, run, use_checksum,
+                                   shot_folder, logger, dry_run)
+                summary.add(res)
+                if progress_cb:
+                    progress_cb(summary.total, len(records), res)
+                    
+                # [수정] 4단계 (KB스캔) 전송 실패 시, 다음 작업을 즉시 일시정지(중단)합니다.
+                if res.kb_scan_status == FAIL:
+                    logger.error(f"[{rec.row_no}행] 4단계 (KB스캔) 전송 실패로 인해 전체 작업을 일시정지(중단)합니다.")
+                    raise RuntimeError("4단계 (KB스캔) 전송 실패로 인해 작업을 일시정지(중단)합니다. 화면 및 로그를 확인한 후 다시 시도해 주세요.")
+                    
+                if not dry_run:
+                    delay = run.get("row_delay_sec", 1.0)
+                    slept = 0.0
+                    while slept < delay:
+                        import solting_auto
+                        solting_auto.check_stop()
+                        time.sleep(0.1)
+                        slept += 0.1
 
         for d in dedups.values():
             d.save()
@@ -182,14 +259,30 @@ def _process_row(rec, stages, engines, dedups, run, use_checksum, shot_folder, l
                 if stamping_enabled:
                     stamped_folder = ins_cfg.get("pdf_stamped_folder", "./output/consent_pdfs_stamped")
                     from pathlib import Path
-                    pdf_path = Path(pdf)
-                    stamped_path = Path(stamped_folder) / pdf_path.name
+                    file_path = Path(pdf)
                     
                     logger.info(f"[{rec.row_no}행] 동의서 자동 서명 및 스탬핑 시작")
-                    from . import pdf_stamper
-                    success = pdf_stamper.stamp_single_pdf(str(pdf_path), str(stamped_path), logger)
-                    if success:
-                        r.consent_stamped_pdf = str(stamped_path)
+                    if file_path.suffix.lower() == ".png":
+                        page_paths = [
+                            str(file_path.parent / f"{file_path.stem}_1.png"),
+                            str(file_path.parent / f"{file_path.stem}_2.png"),
+                            str(file_path.parent / f"{file_path.stem}_3.png")
+                        ]
+                        output_paths = [
+                            str(Path(stamped_folder) / f"{file_path.stem}_1.png"),
+                            str(Path(stamped_folder) / f"{file_path.stem}_2.png"),
+                            str(Path(stamped_folder) / f"{file_path.stem}_3.png")
+                        ]
+                        from . import png_stamper
+                        success = png_stamper.stamp_single_png_set(page_paths, output_paths, logger)
+                        if success:
+                            r.consent_stamped_pdf = str(Path(stamped_folder) / file_path.name)
+                    else:
+                        stamped_path = Path(stamped_folder) / file_path.name
+                        from . import pdf_stamper
+                        success = pdf_stamper.stamp_single_pdf(str(file_path), str(stamped_path), logger)
+                        if success:
+                            r.consent_stamped_pdf = str(stamped_path)
 
     # 3) 전체 상태 산정
     stage_statuses = [_get_stage_status(r, st) for st in stages]
@@ -216,7 +309,7 @@ def _run_stage(stage, rec, engine, dedup, run, shot_folder, logger, dry_run):
         logger.info(f"[{rec.row_no}행] {stage} (dry-run) 등록 대상 OK")
         return SUCCESS, "(dry-run)", ""
 
-    from .automation import RegisterError, RetryableError
+    from .automation import RegisterError, RetryableError, DuplicateCustomerError
     retry_count = run.get("retry_count", 2)
     retry_delay = run.get("retry_delay_sec", 3)
 
@@ -230,6 +323,9 @@ def _run_stage(stage, rec, engine, dedup, run, shot_folder, logger, dry_run):
             dedup.mark_registered(rec.phone)
             logger.info(f"[{rec.row_no}행] {stage} 등록 성공")
             return SUCCESS, "", pdf
+        except DuplicateCustomerError as e:
+            logger.info(f"[{rec.row_no}행] {stage} 건너뜀 - {e}")
+            return SKIP, str(e), ""
         except RetryableError as e:
             if attempt < retry_count:
                 logger.info(f"[{rec.row_no}행] {stage} 재시도 {attempt+1}/{retry_count} - {e}")
@@ -267,3 +363,105 @@ def _shot(engine, shot_folder, row_no, stage):
         return engine.screenshot(path)
     except Exception:
         return ""
+
+def _process_chunk(chunk, stages, engines, dedups, run, shot_folder, logger, dry_run, config, summary, progress_cb, total_records):
+    import solting_auto
+    solting_auto.check_stop()
+    
+    # 결과를 담을 딕셔너리 초기화
+    chunk_results = {}
+    for rec in chunk:
+        ts = _now()
+        chunk_results[rec.row_no] = RowResult(
+            row_no=rec.row_no, jumin=rec.jumin, name=rec.name, phone=rec.phone,
+            status=SKIP, timestamp=ts
+        )
+        
+    # 1) 1단계 솔팅 프로그램 개별 실행
+    if STAGE_SOLTING in stages and not dry_run:
+        for rec in chunk:
+            solting_auto.check_stop()
+            r = chunk_results[rec.row_no]
+            solting_status, solting_reason, _ = _run_stage(
+                STAGE_SOLTING, rec, engines.get(STAGE_SOLTING),
+                dedups[STAGE_SOLTING], run, shot_folder, logger, dry_run
+            )
+            _set_stage(r, STAGE_SOLTING, solting_status, solting_reason)
+            
+    # 2) 2단계 보험사 일괄 실행
+    if STAGE_INSURANCE in stages:
+        if dry_run:
+            for rec in chunk:
+                r = chunk_results[rec.row_no]
+                _set_stage(r, STAGE_INSURANCE, SUCCESS, "(dry-run)")
+        else:
+            batch_data = []
+            for rec in chunk:
+                batch_data.append({
+                    'jumin': rec.jumin,
+                    'name': rec.name,
+                    'phone': rec.phone,
+                    'row_no': rec.row_no
+                })
+                
+            file_format = config.get("insurance", {}).get("oz", {}).get("file_format", "PDF")
+            batch_results = engines[STAGE_INSURANCE].register_and_consent_batch(batch_data, file_format)
+            
+            # 결과 맵핑 및 스탬핑
+            for b_res in batch_results:
+                rec_row = b_res["row_no"]
+                r = chunk_results[rec_row]
+                
+                _set_stage(r, STAGE_INSURANCE, b_res["status"], b_res.get("reason", ""))
+                if b_res["status"] == SUCCESS:
+                    pdf_path_str = b_res["pdf_path"]
+                    r.consent_pdf = pdf_path_str
+                    
+                    # 스탬핑 연동
+                    ins_cfg = config["insurance"]
+                    stamping_enabled = ins_cfg.get("stamping_enabled", True)
+                    if stamping_enabled and pdf_path_str:
+                        stamped_folder = ins_cfg.get("pdf_stamped_folder", "./output/consent_pdfs_stamped")
+                        from pathlib import Path
+                        file_path = Path(pdf_path_str)
+                        
+                        logger.info(f"[{rec_row}행] 동의서 자동 서명 및 스탬핑 시작")
+                        if file_path.suffix.lower() == ".png":
+                            page_paths = [
+                                str(file_path.parent / f"{file_path.stem}_1.png"),
+                                str(file_path.parent / f"{file_path.stem}_2.png"),
+                                str(file_path.parent / f"{file_path.stem}_3.png")
+                            ]
+                            output_paths = [
+                                str(Path(stamped_folder) / f"{file_path.stem}_1.png"),
+                                str(Path(stamped_folder) / f"{file_path.stem}_2.png"),
+                                str(Path(stamped_folder) / f"{file_path.stem}_3.png")
+                            ]
+                            from . import png_stamper
+                            success = png_stamper.stamp_single_png_set(page_paths, output_paths, logger)
+                            if success:
+                                r.consent_stamped_pdf = str(Path(stamped_folder) / file_path.name)
+                        else:
+                            stamped_path = Path(stamped_folder) / file_path.name
+                            from . import pdf_stamper
+                            success = pdf_stamper.stamp_single_pdf(str(file_path), str(stamped_path), logger)
+                            if success:
+                                r.consent_stamped_pdf = str(stamped_path)
+                                
+                    # 등록 성공 마크
+                    dedups[STAGE_INSURANCE].mark_registered(r.phone)
+                    
+    # 3) 전체 상태 산정 및 누적
+    for rec in chunk:
+        r = chunk_results[rec.row_no]
+        stage_statuses = [_get_stage_status(r, st) for st in stages]
+        if FAIL in stage_statuses:
+            r.status = FAIL
+        elif SUCCESS in stage_statuses:
+            r.status = SUCCESS
+        else:
+            r.status = SKIP
+            
+        summary.add(r)
+        if progress_cb:
+            progress_cb(summary.total, total_records, r)
