@@ -15,6 +15,7 @@ from pathlib import Path
 
 from .validators import normalize_phone, normalize_digits
 from .automation import RegisterError, RetryableError, DuplicateCustomerError
+from .reporter import SUCCESS, FAIL, SKIP
 
 
 def _safe(s: str) -> str:
@@ -92,9 +93,18 @@ class InsuranceAutomation:
 
         self.page.set_default_timeout(self.run.get("element_timeout_ms", 10000))
         
-        def handle_dialog(dialog):
-            self.log.info(f"[알림 감지] 브라우저 경고창 자동 수락 처리: {dialog.message}")
-            dialog.accept()
+        self.last_dialog_alert = None
+        self.last_skip_reason = "최근 등록 이력 존재(2개월 이내)"
+        def handle_dialog(dialog_obj):
+            msg = dialog_obj.message
+            self.log.info(f"[알림 감지] 브라우저 경고창 처리 시작: {msg}")
+            self.last_dialog_alert = msg
+            if "재입력" in msg or "당사에 입력된" in msg or "최근" in msg:
+                self.log.info("[알림 감지] 최근 입력 이력 중복창이므로 dismiss(아니오/취소) 처리합니다.")
+                dialog_obj.dismiss()
+            else:
+                self.log.info("[알림 감지] 일반 경고/이미 서면 동의 알림이므로 accept(확인) 처리합니다.")
+                dialog_obj.accept()
         self.page.on("dialog", handle_dialog)
 
         return self
@@ -196,13 +206,15 @@ class InsuranceAutomation:
         dialog = self._open_consent_dialog()
 
         try:
+            self.last_skip_reason = "최근 등록 이력 존재(2개월 이내)"  # 초기 상태 리셋
+            self.last_dialog_alert = None  # 브라우저 얼럿 상태 리셋
             # 입력 (주민번호 먼저 입력 후 고객명 기입으로 순서 정상화)
             self._fill_smart(dialog, self.sel["consent"].get("jumin"), self._fmt_jumin(jumin), "주민번호")
             self._fill_smart(dialog, self.sel["consent"].get("name"), str(name), "이름")
             
-            # 입력 후 1.0초 이내에 중복 팝업이 뜨는지 감지
+            # 입력 후 2.0초 이내에 중복 팝업이 뜨는지 감지
             is_dup = False
-            for _ in range(5):
+            for _ in range(10):
                 solting_auto.check_stop()
                 if self._check_duplicate_popup(dialog):
                     is_dup = True
@@ -210,8 +222,9 @@ class InsuranceAutomation:
                 time.sleep(0.2)
                 
             if is_dup:
-                self.log.info(f"[{name}] 최근 2개월 이내 입력 이력이 존재하여 등록을 건너뜁니다.")
-                raise DuplicateCustomerError("최근 등록 이력 존재(2개월 이내)")
+                reason = getattr(self, "last_skip_reason", "최근 등록 이력 존재(2개월 이내)")
+                self.log.info(f"[{name}] 중복 경고 감지: {reason}. 등록을 건너뜁니다.")
+                raise DuplicateCustomerError(reason)
 
             # 옵션(가입설계 체크 / 입력 / 단독입력) - 이미 기본값이면 실패해도 무시
             self._try_check(dialog, self.sel["consent"].get("agree_check"))
@@ -250,19 +263,34 @@ class InsuranceAutomation:
             for i, rec in enumerate(batch_records):
                 solting_auto.check_stop()
                 
-                # 셀렉터 포맷팅
-                jumin_sel = self.sel["consent"].get("multi_jumin_format", "[id*='iptCustIdno_{i}']").replace("{i}", str(i))
-                name_sel = self.sel["consent"].get("multi_name_format", "[id*='iptCustNm_{i}']").replace("{i}", str(i))
+                # 셀렉터 포맷팅 (KB손보 다중입력 ID 규칙 대응)
+                if self.sel["consent"].get("multi_jumin_format") == "[id*='iptCustIdno_{i}']":
+                    if i == 0:
+                        jumin_sel = "[id$='iptCustIdno']"
+                    else:
+                        jumin_sel = f"[id$='iptCustIdno_{i+1:02d}']"
+                else:
+                    jumin_sel = self.sel["consent"].get("multi_jumin_format", "[id*='iptCustIdno_{i}']").replace("{i}", str(i))
+                    
+                if self.sel["consent"].get("multi_name_format") == "[id*='iptCustNm_{i}']":
+                    if i == 0:
+                        name_sel = "[id$='iptCustNm']"
+                    else:
+                        name_sel = f"[id$='iptCustNm_{i+1:02d}']"
+                else:
+                    name_sel = self.sel["consent"].get("multi_name_format", "[id*='iptCustNm_{i}']").replace("{i}", str(i))
                 
-                self.log.info(f"[{rec['name']}] 다중입력 슬롯 {i}번에 입력 중...")
+                self.last_skip_reason = "최근 등록 이력 존재(2개월 이내)"  # 초기 상태 리셋
+                self.last_dialog_alert = None  # 브라우저 얼럿 상태 리셋
+                self.log.info(f"[{rec['name']}] 다중입력 슬롯 {i}번에 입력 중... jumin_sel={jumin_sel}, name_sel={name_sel}")
                 
                 # 입력 실행
                 self._fill_smart(dialog, jumin_sel, self._fmt_jumin(rec['jumin']), f"주민번호 {i}")
                 self._fill_smart(dialog, name_sel, str(rec['name']), f"이름 {i}")
                 
-                # 중복 팝업 실시간 감지 (1초 대기하며 감지)
+                # 중복 팝업 실시간 감지 (2초 대기하며 감지)
                 is_dup = False
-                for _ in range(5):
+                for _ in range(10):
                     solting_auto.check_stop()
                     if self._check_duplicate_popup(dialog):
                         is_dup = True
@@ -270,7 +298,8 @@ class InsuranceAutomation:
                     time.sleep(0.2)
                     
                 if is_dup:
-                    self.log.info(f"[{rec['name']}] 중복 경고 모달 감지됨. 이 레코드는 건너뜁니다.")
+                    reason = getattr(self, "last_skip_reason", "최근 등록 이력 존재(2개월 이내)")
+                    self.log.info(f"[{rec['name']}] 중복 경고 모달 감지됨. 이 레코드는 건너뜁니다. 사유: {reason}")
                     # 입력했던 슬롯 비우기
                     self._clear_input(dialog, name_sel)
                     self._clear_input(dialog, jumin_sel)
@@ -280,13 +309,29 @@ class InsuranceAutomation:
                         "name": rec["name"],
                         "phone": rec["phone"],
                         "status": SKIP,
-                        "reason": "최근 등록 이력 존재(2개월 이내)",
+                        "reason": reason,
                         "pdf_path": ""
                     })
                 else:
-                    # 체크박스 선택 (chkGrid_i)
-                    chk_sel = f"[id*='chkGrid_{i}']"
-                    self._try_check(dialog, chk_sel)
+                    # 체크박스 선택 (가입설계 & 선택동의 모두 체크)
+                    idx = i + 1
+                    sel1 = f"[id$='group2_checkbox{idx}_input_0']:not([id*='group2_group2_'])"
+                    sel2 = f"[id$='group2_group2_checkbox{idx}_input_0']"
+                    
+                    for sel in [sel1, sel2]:
+                        try:
+                            # 프레임들 중 해당 셀렉터가 존재하는 프레임을 찾아서 JS click 실행 (visibility 제약 우회)
+                            frames_to_search = [self.page] + list(self.page.frames)
+                            for f in frames_to_search:
+                                has_el = f.evaluate(f"() => document.querySelector(\"{sel}\") !== null")
+                                if has_el:
+                                    is_checked = f.evaluate(f"() => {{ return document.querySelector(\"{sel}\").checked; }}")
+                                    if not is_checked:
+                                        f.evaluate(f"() => {{ document.querySelector(\"{sel}\").click(); }}")
+                                        self.log.info(f"슬롯 {i}번 체크박스 선택 완료 ({sel})")
+                                    break
+                        except Exception as e:
+                            self.log.warning(f"슬롯 {i}번 체크박스 선택 오류 ({sel}): {e}")
                     
                     registered_records.append(rec)
                     results.append({
@@ -305,31 +350,69 @@ class InsuranceAutomation:
                 return results
 
             # 4) 일괄 출력 및 캡처
-            actual_format = file_format or self.ins.get("oz", {}).get("file_format", "PDF")
-            ext = ".png" if "PNG" in actual_format.upper() else ".pdf"
-            
+            # ※ 다중입력 '출력'은 OZ 데스크톱 뷰어가 아니라 브라우저로 PDF 가 직접 열린다.
+            #    따라서 단일모드(OZ)와 달리 네트워크 응답/다운로드로 PDF 를 캡처해 지정 폴더에 저장한다.
+            actual_format = "PDF"
             batch_id = int(time.time())
-            temp_dest = self.pdf_dir / f"batch_temp_{batch_id}{ext}"
-            
-            self.log.info(f"등록 성공 고객 {len(registered_records)}명에 대한 일괄 출력 및 저장 시작 (형식: {actual_format})")
-            
-            print_btn = self.sel["consent"].get("print_btn")
-            
-            if self.capture_mode == "oz_windows":
-                from . import oz_viewer
-                try:
-                    self._click_print_btn(dialog, print_btn)
-                except Exception as e:
-                    raise RetryableError(f"'출력' 버튼 클릭 실패: {e}")
-                try:
-                    path = oz_viewer.save_as_pdf(str(temp_dest), self.ins.get("oz", {}), self.log, file_format=actual_format)
-                except Exception as e:
-                    raise RetryableError(f"OZ 뷰어 일괄 {actual_format} 저장 실패: {e}")
-            else:
-                raise RegisterError("다중입력 모드는 OZ Windows 저장 모드(oz_windows)만 지원합니다.")
+            temp_dest = self.pdf_dir / f"batch_temp_{batch_id}.pdf"
 
-            # 5) 생성된 파일 검증 및 개별 분할 저장
-            if "PNG" in actual_format.upper():
+            self.log.info(f"등록 성공 고객 {len(registered_records)}명 일괄 출력(브라우저 PDF) 시작")
+
+            print_btn = self.sel["consent"].get("print_btn")
+            out_timeout = float(self.ins.get("oz", {}).get("open_timeout_sec", 20))
+
+            # 출력 시점 '이미 서면 동의를 받은 고객' 차단 알림이 뜨면, 해당 고객을 배치에서
+            # 제외(행 비우기 + 체크해제 + SKIP)하고 나머지 고객으로 재출력한다. (끊김 없이 진행)
+            path = None
+            max_removals = len(registered_records) + 1
+            for _ in range(max_removals):
+                if not registered_records:
+                    self.log.info("서면동의 완료 등으로 출력 가능한 고객이 모두 제외되었습니다. 출력을 종료합니다.")
+                    return results
+
+                self.log.info(f"등록 고객 {len(registered_records)}명 일괄 출력(PDF) 시도")
+                state, birth6 = self._capture_print_pdf_or_block(dialog, print_btn, temp_dest, timeout=out_timeout)
+
+                if state == "blocked":
+                    # 출력 차단 통지는 (입력시점)생년월일 또는 (출력시점)'N번째 고객' 순번으로 온다.
+                    block_msg = getattr(self, "last_block_msg", "") or ""
+                    pos = self._extract_position(block_msg)
+                    removed = None
+                    if birth6:
+                        for k, rrec in enumerate(registered_records):
+                            if normalize_digits(rrec["jumin"])[:6] == birth6:
+                                removed = k
+                                break
+                    if removed is None and 1 <= pos <= len(registered_records):
+                        removed = pos - 1  # registered_records 는 체크(출력)된 순서
+                    if removed is None:
+                        removed = 0  # 최후: 첫 등록 제거(무한루프 방지)
+
+                    gone = registered_records.pop(removed)
+                    self._clear_and_uncheck_row(gone["jumin"])
+                    for r_item in results:
+                        if r_item["row_no"] == gone["row_no"]:
+                            r_item["status"] = SKIP
+                            r_item["reason"] = "이미 서면 동의를 받은 고객(2개월 이내)"
+                            r_item["pdf_path"] = ""
+                    self.log.info(f"[{gone['name']}] 출력 차단(순번={pos}, 생일={birth6}) → 배치에서 제외 후 재출력합니다.")
+                    self.last_block_msg = ""
+                    time.sleep(0.5)
+                    continue  # 나머지 고객으로 재출력
+
+                if state == "timeout":
+                    raise RetryableError("출력 후 PDF/차단알림이 모두 감지되지 않았습니다(타임아웃).")
+
+                # state == "pdf": temp_dest 에 PDF 저장 완료
+                path = str(temp_dest)
+                break
+
+            if path is None:
+                self.log.warning("일괄 출력을 완료하지 못했습니다(출력 가능 고객 없음).")
+                return results
+
+            # 5) 생성된 파일 검증 및 개별 분할 저장 (다중출력은 항상 PDF → fitz 분할)
+            if str(path).lower().endswith(".png"):
                 total_pages = len(registered_records) * 3
                 self.log.info(f"일괄 출력 이미지 파일들을 개별 고객(인당 3장)으로 매핑합니다. 총 예상 페이지: {total_pages}장")
                 
@@ -431,38 +514,413 @@ class InsuranceAutomation:
         finally:
             self._close_consent_dialog(dialog)
 
-    def _check_duplicate_popup(self, dialog) -> bool:
-        """최근 2개월 이내 입력 이력이 있는 중복 고객 팝업이 뜨는지 감지하고, '아니오'를 눌러 닫습니다."""
-        modal_sel = self.sel["consent"].get("duplicate_modal", "div.popup_confirm")
-        no_btn_sel = self.sel["consent"].get("duplicate_no_btn", "button:has-text('아니오')")
-        
-        if not modal_sel:
+    # ── 출력 시점 '이미 서면 동의를 받은 고객' 차단 알림 처리 ──────────────
+    def _is_consent_block_alert(self, msg) -> bool:
+        """'이미 서면 동의를 받은 고객이라 동의서를 출력할 수 없다'는 출력 차단 알림인지 판별.
+        (입력 시점의 '재입력하시겠습니까?' 와는 다른, 출력 버튼 클릭 시 뜨는 네이티브 alert)
+        """
+        if not msg:
             return False
-            
-        frames_to_search = [self.page] + list(self.page.frames)
-        for f in frames_to_search:
+        # WebSquare 텍스트의 비분리공백(\xa0) 등에 강하도록 공백 제거 후 비교
+        compact = re.sub(r"\s", "", msg)
+        keys = ["이미 서면 동의", "서면 동의를 받은", "출력하실 수 없습니다", "2개월 이후"]
+        return any(re.sub(r"\s", "", k) in compact for k in keys)
+
+    def _extract_birthdate(self, msg) -> str:
+        """알림 문구에서 생년월일 6자리를 추출. 예) '600303 생년월일 고객은...' -> '600303'. 없으면 ''"""
+        if not msg:
+            return ""
+        m = re.search(r"(\d{6})\s*생년월일", msg)
+        if m:
+            return m.group(1)
+        # 보조: 메시지 내 6자리 숫자 폴백
+        m2 = re.search(r"\b(\d{6})\b", msg)
+        return m2.group(1) if m2 else ""
+
+    def _extract_position(self, msg) -> int:
+        """출력 시점 차단 알림의 'N번째 고객은...' 에서 순번 N 추출. 없으면 0.
+        (다중입력 출력 차단은 생년월일이 아닌 순번으로 통지된다)"""
+        if not msg:
+            return 0
+        m = re.search(r"(\d+)\s*번째", msg)
+        return int(m.group(1)) if m else 0
+
+    def _capture_print_pdf_or_block(self, dialog, print_btn, dest_pdf, timeout=20.0):
+        """다중입력 '출력': OZ 뷰어가 아니라 브라우저로 PDF 가 직접 열린다.
+        출력 클릭 후 (a)서면동의 차단 모달 또는 (b)PDF(네트워크 응답/다운로드)를 감시·캡처한다.
+        PDF 는 dest_pdf 에 저장. 반환: ('blocked', birth6) | ('pdf', '') | ('timeout', '').
+        """
+        import solting_auto
+        pdf_bodies = []
+        dl_holder = []
+
+        def on_resp(resp):
             try:
-                loc = f.locator(modal_sel)
-                if loc.count() > 0 and loc.first.is_visible():
-                    text = (loc.first.inner_text() or "").strip()
-                    self.log.info(f"[중복 감지] 모달 발견! 텍스트: {text}")
-                    
-                    no_btn = f.locator(no_btn_sel)
-                    if no_btn.count() > 0 and no_btn.first.is_visible():
-                        self.log.info("[중복 감지] '아니오' 버튼 클릭하여 팝업을 닫습니다.")
-                        no_btn.first.click(force=True)
-                        time.sleep(1.0)
-                        return True
-                    else:
-                        self.log.warning("[중복 감지] 지정된 셀렉터로 '아니오' 버튼을 찾지 못해 텍스트 매칭으로 재시도합니다.")
-                        for alt_btn in ["button:has-text('아니오')", "a:has-text('아니오')", "input[value='아니오']", "text='아니오'"]:
-                            btn_loc = f.locator(alt_btn)
-                            if btn_loc.count() > 0 and btn_loc.first.is_visible():
-                                btn_loc.first.click(force=True)
-                                time.sleep(1.0)
-                                return True
+                ct = (resp.headers or {}).get("content-type", "").lower()
+                url = (resp.url or "")
+                base = url.split("?")[0].lower()
+                looks_pdf = ("application/pdf" in ct or "octet-stream" in ct
+                             or base.endswith(".pdf")
+                             or any(k in url.lower() for k in self.url_keywords))
+                if looks_pdf:
+                    body = resp.body()
+                    if body and body[:4] == b"%PDF":
+                        pdf_bodies.append(body)
+            except Exception:
+                pass
+
+        def attach(pg):
+            try:
+                pg.on("response", on_resp)
+                pg.on("download", lambda d: dl_holder.append(d))
+            except Exception:
+                pass
+
+        for pg in self.context.pages:
+            attach(pg)
+        self.context.on("page", attach)
+
+        self.last_dialog_alert = None
+        try:
+            self._click_print_btn(dialog, print_btn)
+        except Exception as e:
+            try: self.context.remove_listener("page", attach)
+            except Exception: pass
+            raise RetryableError(f"'출력' 버튼 클릭 실패: {e}")
+
+        result = ("timeout", "")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            solting_auto.check_stop()
+            try:
+                h, k, b = self._detect_block_modal(dialog)
+            except Exception:
+                h, k, b = (False, "", "")
+            if h and k == "consent_block":
+                result = ("blocked", b)
+                break
+            if pdf_bodies:
+                try:
+                    dest_pdf.parent.mkdir(parents=True, exist_ok=True)
+                    best = max(pdf_bodies, key=len)
+                    dest_pdf.write_bytes(best)
+                    self.log.info(f"[다중출력] PDF 네트워크 응답 캡처 저장: {dest_pdf.name} ({len(best)} bytes)")
+                    result = ("pdf", "")
+                    break
+                except Exception as e:
+                    self.log.warning(f"PDF 응답 저장 실패: {e}")
+            if dl_holder:
+                try:
+                    dl_holder[0].save_as(str(dest_pdf))
+                    self.log.info(f"[다중출력] PDF 다운로드 캡처 저장: {dest_pdf.name}")
+                    result = ("pdf", "")
+                    break
+                except Exception as e:
+                    self.log.warning(f"PDF 다운로드 저장 실패: {e}")
+            time.sleep(0.4)
+
+        try: self.context.remove_listener("page", attach)
+        except Exception: pass
+        return result
+
+    def _clear_and_uncheck_row(self, jumin_digits: str) -> bool:
+        """다중입력 그리드에서 주민번호가 jumin_digits 와 일치하는 행의 성명/주민번호를 비우고
+        해당 행의 체크박스(가입설계/선택동의)도 해제한다. (출력 차단 고객 배치 제외용)"""
+        from .validators import normalize_digits
+        jd = normalize_digits(jumin_digits)
+        if not jd:
+            return False
+        frames = [self.page] + list(self.page.frames)
+        for f in frames:
+            try:
+                els = f.query_selector_all("input[id*='iptCustIdno']")
             except Exception:
                 continue
+            for el in els:
+                try:
+                    raw = normalize_digits(el.input_value() or "")
+                except Exception:
+                    continue
+                if raw and raw == jd:
+                    el_id = el.get_attribute("id") or ""
+                    try:
+                        el.fill("")
+                        el.evaluate("e=>{e.dispatchEvent(new Event('change',{bubbles:true}));e.dispatchEvent(new Event('input',{bubbles:true}));}")
+                    except Exception:
+                        pass
+                    # 같은 행 성명칸
+                    if "iptCustIdno" in el_id:
+                        nid = el_id.replace("iptCustIdno", "iptCustNm")
+                        try:
+                            nel = f.query_selector(f"[id='{nid}']")
+                            if nel:
+                                nel.fill("")
+                        except Exception:
+                            pass
+                    # 행 인덱스 추정 → 체크박스 해제
+                    m = re.search(r"iptCustIdno_(\d{2})$", el_id)
+                    idx = int(m.group(1)) if m else 1
+                    for csel in (f"[id$='group2_checkbox{idx}_input_0']:not([id*='group2_group2_'])",
+                                 f"[id$='group2_group2_checkbox{idx}_input_0']"):
+                        try:
+                            for cf in frames:
+                                if cf.evaluate(f'()=>document.querySelector("{csel}")!==null'):
+                                    cf.evaluate(f'()=>{{const e=document.querySelector("{csel}"); if(e&&e.checked)e.click();}}')
+                                    break
+                        except Exception:
+                            pass
+                    self.log.info(f"[출력차단] 주민 {jd[:6]}*** 행 비움+체크해제 (id={el_id}, idx={idx})")
+                    return True
+        self.log.warning(f"[출력차단] 주민 {jd[:6]}*** 행을 그리드에서 찾지 못했습니다.")
+        return False
+
+    def _wait_consent_block(self, timeout: float = 3.0, dialog=None):
+        """출력 버튼 클릭 직후, '이미 서면 동의를 받은 고객' 출력 차단 알림이 뜨는지 timeout 동안 폴링.
+        KB 알림은 WebSquare DOM 모달이므로 네이티브 alert(last_dialog_alert) 와 DOM 모달을 모두 확인한다.
+        감지 시 (True, 생년월일str), 미감지 시 (False, "").
+        """
+        import solting_auto
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            solting_auto.check_stop()
+            # 1) 네이티브 alert (혹시 native 인 경우)
+            msg = getattr(self, "last_dialog_alert", None)
+            if msg:
+                if self._is_consent_block_alert(msg):
+                    self.last_dialog_alert = None
+                    return True, self._extract_birthdate(msg)
+                self.last_dialog_alert = None
+            # 2) WebSquare DOM 모달
+            try:
+                handled, kind, birth6 = self._detect_block_modal(dialog)
+            except Exception as e:
+                self.log.debug(f"[중복모달] 출력시점 감지 예외(무시): {e}")
+                handled, kind, birth6 = (False, "", "")
+            if handled and kind == "consent_block":
+                return True, birth6
+            time.sleep(0.2)
+        return False, ""
+
+    def _await_output_or_block(self, dialog, timeout: float = 20.0):
+        """출력 버튼 클릭 후, '이미 서면 동의' 차단 모달과 OZ 리포트 뷰어 등장을 동시에 감시한다.
+        (입력 시점에 누락된 서면동의 고객이 출력 시점에 늦게 차단 모달을 띄워도 안전하게 잡기 위함)
+        반환: ('blocked', birth6) | ('oz', '') | ('timeout', '')
+        """
+        import solting_auto
+        from . import oz_viewer
+        oz_cfg = self.ins.get("oz", {})
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            solting_auto.check_stop()
+            # 1) 차단 모달 우선 확인(있으면 확인 클릭하며 닫음)
+            try:
+                handled, kind, birth6 = self._detect_block_modal(dialog)
+            except Exception:
+                handled, kind, birth6 = (False, "", "")
+            if handled and kind == "consent_block":
+                return "blocked", birth6
+            # 2) OZ 뷰어가 떴는지 확인 → 떴으면 정상 출력 진행
+            try:
+                if oz_viewer.oz_window_exists(oz_cfg):
+                    return "oz", ""
+            except Exception:
+                pass
+            time.sleep(0.4)
+        return "timeout", ""
+
+    def _modal_search_targets(self, dialog=None):
+        """모달을 탐색할 프레임/페이지 목록(중복 제거). dialog(팝업 페이지)도 포함."""
+        targets = []
+        if dialog is not None:
+            try:
+                if dialog not in targets:
+                    targets.append(dialog)
+                if hasattr(dialog, "frames"):
+                    for fr in dialog.frames:
+                        if fr not in targets:
+                            targets.append(fr)
+            except Exception:
+                pass
+        try:
+            if self.page not in targets:
+                targets.append(self.page)
+            for fr in self.page.frames:
+                if fr not in targets:
+                    targets.append(fr)
+        except Exception:
+            pass
+        return targets
+
+    def _click_modal_button(self, frame, modal_el, btn_texts) -> bool:
+        """모달 내부 우선 → 프레임 전역 순으로 지정 텍스트 버튼을 강건하게 클릭(WebSquare 대응)."""
+        # KB(WebSquare) confpop 의 확정 버튼 id 접미사 (실 DOM 확인됨)
+        ws_id = {"확인": "btn_confirm", "아니오": "btn_no", "예": "btn_yes", "취소": "btn_cancel"}
+        for txt in btn_texts:
+            candidates = []
+            if txt in ws_id:
+                candidates.append(f"input[id$='{ws_id[txt]}']")
+            candidates += [
+                f"button:has-text('{txt}')", f"a:has-text('{txt}')",
+                f"input[type='button'][value='{txt}']", f"input[value='{txt}']",
+                f".w2trigger:has-text('{txt}')", f".w2textbox:has-text('{txt}')",
+                f"[class*='btn']:has-text('{txt}')", f"[class*='trigger']:has-text('{txt}')",
+                f"text='{txt}'", f"span:has-text('{txt}')", f"div:has-text('{txt}')",
+            ]
+            for scope in (modal_el, frame):
+                if scope is None:
+                    continue
+                for cs in candidates:
+                    try:
+                        b = scope.locator(cs)
+                        if b.count() > 0 and b.first.is_visible():
+                            try:
+                                b.first.click(force=True, timeout=2000)
+                            except Exception:
+                                b.first.evaluate("e => e.click()")
+                            return True
+                    except Exception:
+                        continue
+        return False
+
+    def _detect_block_modal(self, dialog=None):
+        """모든 프레임에서 WebSquare '알림' DOM 모달(서면동의 완료 / 최근입력 중복)을 찾아
+        분류 후 적절한 버튼(확인 / 아니오)을 눌러 닫는다.
+        반환: (handled: bool, kind: str, birth6: str)  kind ∈ {'consent_block','recent_input',''}
+        """
+        # KB(WebSquare) 알림/확인 팝업은 .w2floatingLayer.confpop 구조 (실 DOM 확인됨)
+        modal_selectors = [
+            ".w2floatingLayer.confpop", ".confpop", ".w2floatingLayer",
+            ".w2window", ".w2modal", "div[class*='w2alert']", "div[class*='w2confirm']",
+            ".popup_confirm", ".popup_confirm_box", ".w2wframe_popup",
+            "div[class*='popup']", "div[class*='modal']", "div[class*='dialog']",
+        ]
+        consent_kws = ["이미 서면 동의", "서면 동의를 받은", "출력하실 수 없습니다", "동의서를 출력하실 수", "2개월 이후"]
+        recent_kws = ["재입력", "당사에 입력된", "최근 2개월", "이미 등록된 고객"]
+
+        for f in self._modal_search_targets(dialog):
+            for sel in modal_selectors:
+                try:
+                    loc = f.locator(sel)
+                    cnt = loc.count()
+                except Exception:
+                    continue
+                for idx in range(min(cnt, 15)):
+                    try:
+                        el = loc.nth(idx)
+                        if not el.is_visible():
+                            continue
+                        text = (el.inner_text() or "").strip()
+                    except Exception:
+                        continue
+                    if not text:
+                        continue
+
+                    # WebSquare 모달 텍스트는 단어 사이에 비분리공백(\xa0) 등을 쓰므로
+                    # 모든 공백을 제거하고 비교한다.
+                    text_compact = re.sub(r"\s", "", text)
+                    is_consent = any(re.sub(r"\s", "", k) in text_compact for k in consent_kws)
+                    is_recent = any(re.sub(r"\s", "", k) in text_compact for k in recent_kws)
+                    if not (is_consent or is_recent):
+                        continue
+
+                    # 메인 동의서 출력 폼/그리드(입력칸 포함)를 잡은 경우는 알림 모달이 아니므로 skip
+                    try:
+                        if el.locator("input[id*='iptCustNm'], input[id*='iptCustIdno']").count() > 0:
+                            continue
+                    except Exception:
+                        pass
+
+                    kind = "consent_block" if is_consent else "recent_input"
+                    birth6 = self._extract_birthdate(text) if is_consent else ""
+                    self.last_block_msg = text  # 출력 차단 'N번째 고객' 순번 파싱용
+                    self.log.info(f"[중복모달] 감지 kind={kind} sel={sel} text={text[:120]}")
+                    try:
+                        html = el.evaluate("e => e.outerHTML") or ""
+                        if html:
+                            self.log.info(f"[중복모달] outerHTML(앞 800자): {html[:800]}")
+                    except Exception:
+                        pass
+
+                    btn_texts = ["확인", "닫기"] if kind == "consent_block" else ["아니오", "취소", "닫기", "확인"]
+                    clicked = self._click_modal_button(f, el, btn_texts)
+                    if clicked:
+                        self.log.info(f"[중복모달] '{btn_texts[0]}' 계열 버튼 클릭 완료 (kind={kind})")
+                    else:
+                        self.log.warning(f"[중복모달] 버튼 클릭 실패(kind={kind}) — 위 outerHTML로 셀렉터 보정 필요")
+                    time.sleep(0.8)
+                    return True, kind, birth6
+        return False, "", ""
+
+    def _clear_multi_row_by_birthdate(self, birth6: str) -> bool:
+        """다중입력 그리드에서 주민번호가 birth6 로 시작하는 행의 주민번호/성명 입력을 비운다.
+        성공 시 True. (서면동의 완료로 출력 차단된 고객을 배치에서 제외하기 위함)
+        """
+        if not birth6:
+            return False
+        frames = [self.page] + list(self.page.frames)
+        for f in frames:
+            try:
+                els = f.query_selector_all("input[id*='iptCustIdno']")
+            except Exception:
+                continue
+            for el in els:
+                try:
+                    raw = el.input_value() or ""
+                except Exception:
+                    continue
+                digits = raw.replace("-", "").replace(" ", "")
+                if digits and digits.startswith(birth6):
+                    el_id = el.get_attribute("id") or ""
+                    try:
+                        el.fill("")
+                        el.evaluate("""e => { e.dispatchEvent(new Event('change',{bubbles:true})); e.dispatchEvent(new Event('input',{bubbles:true})); }""")
+                    except Exception:
+                        try:
+                            el.evaluate("e => { e.value=''; }")
+                        except Exception:
+                            pass
+                    # 같은 행의 성명 입력칸도 비움 (id 의 iptCustIdno -> iptCustNm 치환)
+                    if el_id and "iptCustIdno" in el_id:
+                        name_id = el_id.replace("iptCustIdno", "iptCustNm")
+                        try:
+                            nel = f.query_selector(f"[id='{name_id}']")
+                            if nel:
+                                nel.fill("")
+                                nel.evaluate("""e => { e.dispatchEvent(new Event('change',{bubbles:true})); e.dispatchEvent(new Event('input',{bubbles:true})); }""")
+                        except Exception:
+                            pass
+                    self.log.info(f"[다중입력] 서면동의 완료 고객(생년월일 {birth6}) 행을 비웠습니다. (id={el_id})")
+                    return True
+        self.log.warning(f"[다중입력] 생년월일 {birth6} 고객의 입력 행을 찾지 못해 비우지 못했습니다.")
+        return False
+
+    def _check_duplicate_popup(self, dialog) -> bool:
+        """입력/출력 시점에 뜨는 중복·차단 알림(서면동의 완료 / 최근입력 재입력)을 감지·처리한다.
+        네이티브 alert 와 WebSquare DOM 모달을 모두 확인한다. 감지 시 last_skip_reason 설정 후 True.
+        """
+        # 1) 네이티브 alert (혹시 native 로 뜬 경우)
+        msg = getattr(self, "last_dialog_alert", None)
+        if msg:
+            self.last_dialog_alert = None
+            if self._is_consent_block_alert(msg):
+                self.last_skip_reason = "이미 서면 동의를 받은 고객(2개월 이내)"
+            else:
+                self.last_skip_reason = "최근 등록 이력 존재(2개월 이내)"
+            self.log.info(f"[중복알림-native] {msg[:120]}")
+            return True
+
+        # 2) WebSquare DOM 모달
+        try:
+            handled, kind, _birth = self._detect_block_modal(dialog)
+        except Exception as e:
+            self.log.debug(f"[중복모달] 입력시점 감지 예외(무시): {e}")
+            return False
+        if handled:
+            self.last_skip_reason = (
+                "이미 서면 동의를 받은 고객(2개월 이내)" if kind == "consent_block"
+                else "최근 등록 이력 존재(2개월 이내)"
+            )
+            return True
         return False
 
     def _clear_input(self, dialog, selector):
@@ -508,6 +966,20 @@ class InsuranceAutomation:
                     raise RegisterError(f"메뉴 '{menu}'를 찾을 수 없습니다.")
             popup = pinfo.value
             popup.wait_for_load_state()
+            
+            # 팝업 창에도 동일한 대화상자 감지 리스너 등록
+            def handle_popup_dialog(dialog_obj):
+                msg = dialog_obj.message
+                self.log.info(f"[알림 감지 - 팝업] 경고창 처리 시작: {msg}")
+                self.last_dialog_alert = msg
+                if "재입력" in msg or "당사에 입력된" in msg or "최근" in msg:
+                    self.log.info("[알림 감지 - 팝업] 최근 입력 이력 중복창이므로 dismiss(아니오/취소) 처리합니다.")
+                    dialog_obj.dismiss()
+                else:
+                    self.log.info("[알림 감지 - 팝업] 일반 경고/이미 서면 동의 알림이므로 accept(확인) 처리합니다.")
+                    dialog_obj.accept()
+            popup.on("dialog", handle_popup_dialog)
+            
             self.log.info("새 브라우저 팝업 창이 감지되었습니다.")
             return popup
         except Exception as e:
@@ -582,10 +1054,38 @@ class InsuranceAutomation:
                 self.log.debug(f"팝업 close() 실패: {e}")
         
         # Case B: dialog가 메인 페이지 내 모달(Frame)인 경우
+        # 만약 dialog가 None인 경우, 실제 동의서 출력 화면이 열려 있는 프레임을 찾습니다.
+        target_frames = []
+        if dialog is None:
+            for f in [self.page] + list(self.page.frames):
+                try:
+                    if f.locator("[id*='iptCustNm'], [id*='iptCustIdno']").count() > 0:
+                        target_frames.append(f)
+                except Exception:
+                    continue
+            if not target_frames:
+                self.log.info("열려 있는 동의서 출력 모달이 없습니다. 건너뜁니다.")
+                return
+        else:
+            # dialog가 Frame 또는 Page인 경우 해당 객체만 검색 대상으로 설정
+            target_frames = [dialog]
+            # 만약 dialog가 메인 page이면, 모든 프레임을 검색 대상에 넣되, 동의서가 있는 프레임 위주로 검색하도록 함
+            if dialog == self.page:
+                target_frames = [self.page] + list(self.page.frames)
+
         self.log.info("모달 창을 닫기 위해 '닫기' 및 '창닫기(X)' 버튼을 탐색합니다...")
         try:
-            frames_to_search = [self.page] + list(self.page.frames)
-            for f in frames_to_search:
+            for f in target_frames:
+                # 단, 해당 프레임에 동의서 관련 요소(iptCustNm 등)가 있는지 먼저 체크하여,
+                # 동의서가 없는 프레임의 닫기 버튼(예: 메인 화면의 닫기 버튼)을 잘못 클릭하는 일을 원천 차단합니다.
+                # dialog가 page일 경우, 여러 프레임 중 동의서 입력폼이 있는 프레임만 필터링합니다.
+                if f != self.page:
+                    try:
+                        if f.locator("[id*='iptCustNm'], [id*='iptCustIdno']").count() == 0:
+                            continue
+                    except Exception:
+                        continue
+                
                 try:
                     # 1) '닫기' 텍스트/값/태그를 가진 엘리먼트 통합 탐색 (가장 흔함)
                     selectors = ["input[value='닫기']", "button:has-text('닫기')", "a:has-text('닫기')", "text='닫기'"]
@@ -645,14 +1145,31 @@ class InsuranceAutomation:
 
         if self.capture_mode == "oz_windows":
             from . import oz_viewer
+            self.last_dialog_alert = None  # 출력 직전 알림 상태 리셋
             try:
                 self._click_print_btn(dialog, print_btn)
             except Exception as e:
                 raise RetryableError(f"'출력' 버튼 클릭 실패: {e}")
+            # 출력 후 '차단 모달' 과 'OZ 뷰어' 등장을 동시에 감시(차단 알림이 늦게 떠도 안전하게 SKIP)
+            oz_open_timeout = float(self.ins.get("oz", {}).get("open_timeout_sec", 20))
+            state, _ = self._await_output_or_block(dialog, timeout=oz_open_timeout)
+            if state == "blocked":
+                self.last_skip_reason = "이미 서면 동의를 받은 고객(2개월 이내)"
+                self.log.info(f"[{name}] 출력 시점 서면동의 완료 차단 알림 감지 → 등록을 건너뜁니다.")
+                raise DuplicateCustomerError("이미 서면 동의를 받은 고객(2개월 이내)")
+            if state == "timeout":
+                raise RetryableError("출력 후 OZ 뷰어와 차단 알림이 모두 감지되지 않았습니다(타임아웃).")
             try:
                 path = oz_viewer.save_as_pdf(str(dest), self.ins.get("oz", {}), self.log, file_format=actual_format)
             except Exception as e:
-                raise RetryableError(f"OZ 뷰어 저장 실패: {e}")
+                # 저장 후처리(창닫기/덮어쓰기 대화상자 등)에서 예외가 나도 실제 결과 파일이
+                # 생성됐으면 성공 처리하여 불필요한 재시도(=같은 고객 재출력)를 차단한다.
+                try:
+                    verified = self._verify(dest)
+                    self.log.info(f"OZ 저장 중 예외가 있었으나 결과 파일이 확인되어 성공 처리합니다: {e}")
+                    return verified
+                except Exception:
+                    raise RetryableError(f"OZ 뷰어 저장 실패: {e}")
             return self._verify(Path(path))
 
         if self.capture_mode == "download":
@@ -726,9 +1243,11 @@ class InsuranceAutomation:
     def _verify(self, dest: Path) -> str:
         is_png = dest.suffix.lower() == ".png"
         if is_png:
-            first_page = dest.parent / f"{dest.stem}_1.png"
-            if not first_page.exists() or first_page.stat().st_size == 0:
-                raise RetryableError("동의서 PNG 이미지 파일이 저장되지 않았습니다.")
+            # OZ 실제 저장 명명({stem}.png, {stem}_N_1.png)을 표준형 {stem}_N.png 로 정규화.
+            from . import oz_viewer
+            if oz_viewer.normalize_png_pages(dest, self.log):
+                return str(dest)
+            raise RetryableError("동의서 PNG 이미지 파일이 저장되지 않았습니다.")
         else:
             if not dest.exists() or dest.stat().st_size == 0:
                 raise RetryableError("동의서 PDF가 저장되지 않았습니다.")
@@ -973,28 +1492,47 @@ class InsuranceAutomation:
             for f in frames_to_search:
                 try:
                     loc = f.locator(selector)
-                    if loc.count() > 0 and loc.first.is_visible():
-                        loc.first.click(force=True, timeout=3000)
-                        self.log.info(f"[{action_name}] 모든 프레임 탐색을 통해 셀렉터 '{selector}'를 클릭했습니다.")
+                    cnt = loc.count()
+                    # .first 만 보면 stale(숨은) 팝업 버튼을 집을 수 있으므로, 보이는 매치를 찾는다.
+                    for i in range(cnt):
+                        el = loc.nth(i)
+                        try:
+                            if not el.is_visible():
+                                continue
+                        except Exception:
+                            continue
+                        el.click(force=True, timeout=3000)
+                        self.log.info(f"[{action_name}] 셀렉터 '{selector}' 의 보이는 요소(idx={i})를 클릭했습니다. (frame={f.name})")
                         return
                 except Exception as click_err:
                     self.log.warning(f"[{action_name}] 프레임 '{f.name}'에서 셀렉터 '{selector}' 클릭 실패 (스킵/계속): {click_err}")
                     continue
-            self.log.info(f"[{action_name}] 모든 프레임에서 셀렉터 '{selector}'를 찾을 수 없어 자가 치유(Self-healing) 검색을 가동합니다.")
+            self.log.info(f"[{action_name}] 모든 프레임에서 보이는 '{selector}'를 찾을 수 없어 자가 치유(Self-healing) 검색을 가동합니다.")
 
         keywords = ["출력", "인쇄", "인쇄하기", "출력하기", "저장", "프린트"]
         frames_to_search = [self.page] + list(self.page.frames)
-        
+
+        # WebSquare 출력 버튼은 <input type=button value='출력'> 형태라 text= 로는 안 잡힌다.
+        # value 기반 + 텍스트 기반을 모두, '보이는' 요소로 한정해 클릭한다.
         for f in frames_to_search:
             for kw in keywords:
-                try:
-                    loc = f.locator(f"text={kw}")
-                    if loc.count() > 0 and loc.first.is_visible():
-                        loc.first.click(force=True, timeout=2000)
-                        self.log.info(f"[{action_name}] 프레임 '{f.name}'에서 '{kw}' 텍스트 매칭 클릭 성공!")
-                        return
-                except Exception as click_err:
-                    continue
+                for cand in (f"input[value='{kw}']", f"input[type='button'][value='{kw}']",
+                             f"button:has-text('{kw}')", f"a:has-text('{kw}')", f"text={kw}"):
+                    try:
+                        loc = f.locator(cand)
+                        cnt = loc.count()
+                    except Exception:
+                        continue
+                    for i in range(cnt):
+                        try:
+                            el = loc.nth(i)
+                            if not el.is_visible():
+                                continue
+                            el.click(force=True, timeout=2000)
+                            self.log.info(f"[{action_name}] '{cand}' 의 보이는 요소 클릭 성공! (frame={f.name})")
+                            return
+                        except Exception:
+                            continue
                     
         best_el = None
         best_score = 0
@@ -1088,7 +1626,7 @@ class InsuranceAutomation:
                 continue
         return False
 
-    def upload_to_kb_scan(self, stamped_pdf_path: str) -> bool:
+    def upload_to_kb_scan(self, stamped_pdf_path) -> bool:
         """4단계: 서명/스탬프 작업을 마친 동의서를 KB EDMS 스캔 시스템에 자동 전송합니다."""
         import solting_auto
         solting_auto.check_stop()
@@ -1097,27 +1635,47 @@ class InsuranceAutomation:
         import os
         import shutil
         
-        filename = Path(stamped_pdf_path).name
-        stem = Path(stamped_pdf_path).stem
+        paths_list = stamped_pdf_path if isinstance(stamped_pdf_path, list) else [stamped_pdf_path]
+        if not paths_list:
+            self.log.warning("업로드할 파일 목록이 비어 있습니다.")
+            return True
+
+        first_path = Path(paths_list[0])
+        filename = first_path.name
+        stem = first_path.stem
+        is_png = first_path.suffix.lower() == ".png"
         
         # 1) 파일 복사 (기본 문서 폴더 및 EDMS2 하위 폴더 둘 다 복사하여 접근 가능성 극대화)
         try:
             user_docs = Path(os.environ["USERPROFILE"]) / "Documents"
-            
-            # C:\Users\USER\Documents 에 직접 복사 (기본 "문서" 폴더)
-            target_pdf_docs = user_docs / filename
-            shutil.copy2(stamped_pdf_path, target_pdf_docs)
-            self.log.info(f"EDMS 전송용 파일 복사 완료 (문서): {target_pdf_docs}")
-            
-            # C:\Users\USER\Documents\EDMS2 에 복사 (백업/서브폴더)
             edms_dir = user_docs / "EDMS2"
             edms_dir.mkdir(parents=True, exist_ok=True)
+            
+            for path_str in paths_list:
+                p_path = Path(path_str)
+                p_filename = p_path.name
+                p_stem = p_path.stem
+                p_is_png = p_path.suffix.lower() == ".png"
+                
+                if p_is_png:
+                    # PNG일 경우 3개의 페이지 분할 이미지 복사
+                    for suffix in ["_1.png", "_2.png", "_3.png"]:
+                        src_file = p_path.parent / f"{p_stem}{suffix}"
+                        if src_file.exists():
+                            shutil.copy2(src_file, user_docs / f"{p_stem}{suffix}")
+                            shutil.copy2(src_file, edms_dir / f"{p_stem}{suffix}")
+                    self.log.info(f"EDMS 전송용 PNG 이미지 3장 복사 완료 (문서 및 EDMS2): {p_stem}")
+                else:
+                    # PDF일 경우 단일 파일 복사
+                    if p_path.exists():
+                        shutil.copy2(p_path, user_docs / p_filename)
+                        shutil.copy2(p_path, edms_dir / p_filename)
+                        self.log.info(f"EDMS 전송용 PDF 파일 복사 완료 (문서 및 EDMS2): {p_filename}")
+            
             target_pdf_path = edms_dir / filename
-            shutil.copy2(stamped_pdf_path, target_pdf_path)
-            self.log.info(f"EDMS 전송용 파일 복사 완료 (EDMS2): {target_pdf_path}")
         except Exception as copy_err:
-            self.log.error(f"EDMS 파일 복사 중 예외 발생 (기본 경로로 업로드 시도): {copy_err}")
-            target_pdf_path = Path(stamped_pdf_path)
+            self.log.error(f"EDMS 파일 복사 중 예외 발생: {copy_err}")
+            target_pdf_path = first_path
             
         edms_page = None
         
@@ -1390,19 +1948,28 @@ class InsuranceAutomation:
             edms_dir.mkdir(parents=True, exist_ok=True)
             for pdf_path_str in stamped_pdf_paths:
                 pdf_path = Path(pdf_path_str)
-                if pdf_path.exists():
-                    filename = pdf_path.name
-                    # C:\Users\USER\Documents 에 직접 복사 (기본 "문서" 폴더)
-                    target_pdf_docs = user_docs / filename
-                    shutil.copy2(pdf_path, target_pdf_docs)
-                    self.log.info(f"EDMS 전송용 파일 복사 완료 (문서): {target_pdf_docs}")
-                    
-                    # C:\Users\USER\Documents\EDMS2 에 복사 (백업/서브폴더)
-                    target_pdf_path = edms_dir / filename
-                    shutil.copy2(pdf_path, target_pdf_path)
-                    self.log.info(f"EDMS 전송용 파일 복사 완료 (EDMS2): {target_pdf_path}")
+                filename = pdf_path.name
+                stem = pdf_path.stem
+                is_png = pdf_path.suffix.lower() == ".png"
+                
+                if is_png:
+                    first_page = pdf_path.parent / f"{stem}_1.png"
+                    if first_page.exists():
+                        for suffix in ["_1.png", "_2.png", "_3.png"]:
+                            src_file = pdf_path.parent / f"{stem}{suffix}"
+                            if src_file.exists():
+                                shutil.copy2(src_file, user_docs / f"{stem}{suffix}")
+                                shutil.copy2(src_file, edms_dir / f"{stem}{suffix}")
+                        self.log.info(f"EDMS 전송용 PNG 이미지 3장 복사 완료 (문서 및 EDMS2): {stem}")
+                    else:
+                        self.log.warning(f"복사할 원본 PNG 파일(1페이지)이 존재하지 않습니다: {first_page}")
                 else:
-                    self.log.warning(f"복사할 원본 파일이 존재하지 않습니다: {pdf_path_str}")
+                    if pdf_path.exists():
+                        shutil.copy2(pdf_path, user_docs / filename)
+                        shutil.copy2(pdf_path, edms_dir / filename)
+                        self.log.info(f"EDMS 전송용 PDF 파일 복사 완료 (문서 및 EDMS2): {filename}")
+                    else:
+                        self.log.warning(f"복사할 원본 PDF 파일이 존재하지 않습니다: {pdf_path_str}")
         except Exception as copy_err:
             self.log.error(f"EDMS 일괄 전송을 위한 파일 복사 중 예외 발생: {copy_err}")
             

@@ -7,6 +7,7 @@ def stamp_single_png_set(page_paths: list, output_paths: list, logger) -> bool:
     page_paths: [page1_path, page2_path, page3_path]
     output_paths: [out1_path, out2_path, out3_path]
     """
+    saved_count = 0
     try:
         # 1페이지 처리
         if len(page_paths) >= 1 and os.path.exists(page_paths[0]):
@@ -14,7 +15,7 @@ def stamp_single_png_set(page_paths: list, output_paths: list, logger) -> bool:
             w, h = img.size
             # PDF 기준 크기 (A4: 595 x 842) 대비 스케일 계산
             sx, sy = w / 595.0, h / 842.0
-            
+
             draw = ImageDraw.Draw(img)
             # 고유식별정보, 민감정보, 개인(신용)정보 수집/이용 동의
             p1_coords = [(515, 315), (515, 355), (515, 490)]
@@ -22,14 +23,17 @@ def stamp_single_png_set(page_paths: list, output_paths: list, logger) -> bool:
                 _draw_checkmark(draw, cx * sx, cy * sy, sx, sy)
             os.makedirs(os.path.dirname(output_paths[0]), exist_ok=True)
             img.save(output_paths[0])
+            saved_count += 1
             logger.info(f"PNG 1페이지 동의함 체크 완료: {os.path.basename(output_paths[0])}")
+        elif len(page_paths) >= 1:
+            logger.warning(f"PNG 1페이지 입력 파일이 없어 건너뜁니다: {page_paths[0]}")
 
         # 2페이지 처리
         if len(page_paths) >= 2 and os.path.exists(page_paths[1]):
             img = Image.open(page_paths[1])
             w, h = img.size
             sx, sy = w / 595.0, h / 842.0
-            
+
             draw = ImageDraw.Draw(img)
             # 고유식별정보, 민감정보, 개인(신용)정보 제공 동의, 국외 제공 동의
             p2_coords = [(515, 215), (515, 265), (515, 375), (490, 720)]
@@ -37,26 +41,35 @@ def stamp_single_png_set(page_paths: list, output_paths: list, logger) -> bool:
                 _draw_checkmark(draw, cx * sx, cy * sy, sx, sy)
             os.makedirs(os.path.dirname(output_paths[1]), exist_ok=True)
             img.save(output_paths[1])
+            saved_count += 1
             logger.info(f"PNG 2페이지 동의함 체크 완료: {os.path.basename(output_paths[1])}")
+        elif len(page_paths) >= 2:
+            logger.warning(f"PNG 2페이지 입력 파일이 없어 건너뜁니다: {page_paths[1]}")
 
         # 3페이지 처리
         if len(page_paths) >= 3 and os.path.exists(page_paths[2]):
             img = Image.open(page_paths[2])
             w, h = img.size
             sx, sy = w / 595.0, h / 842.0
-            
+
             draw = ImageDraw.Draw(img)
             # 민감정보 조회, 개인(신용)정보 및 공공정보 조회 동의
             p3_coords = [(515, 370), (515, 475)]
             for cx, cy in p3_coords:
                 _draw_checkmark(draw, cx * sx, cy * sy, sx, sy)
-            
+
             # 서명(인) 란 서명 드로잉
             _draw_signature(draw, 250 * sx, 635 * sy, sx, sy)
             os.makedirs(os.path.dirname(output_paths[2]), exist_ok=True)
             img.save(output_paths[2])
+            saved_count += 1
             logger.info(f"PNG 3페이지 동의함 체크 및 필기체 서명 드로잉 완료: {os.path.basename(output_paths[2])}")
-            
+        elif len(page_paths) >= 3:
+            logger.warning(f"PNG 3페이지 입력 파일이 없어 건너뜁니다: {page_paths[2]}")
+
+        if saved_count == 0:
+            logger.error("스탬핑할 PNG 입력 파일을 하나도 찾지 못해 결과물이 저장되지 않았습니다.")
+            return False
         return True
     except Exception as e:
         logger.error(f"동의서 PNG 스탬핑 작업 중 예외 발생: {e}")

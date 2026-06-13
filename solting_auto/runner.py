@@ -263,26 +263,47 @@ def _process_row(rec, stages, engines, dedups, run, use_checksum, shot_folder, l
                     
                     logger.info(f"[{rec.row_no}행] 동의서 자동 서명 및 스탬핑 시작")
                     if file_path.suffix.lower() == ".png":
-                        page_paths = [
-                            str(file_path.parent / f"{file_path.stem}_1.png"),
-                            str(file_path.parent / f"{file_path.stem}_2.png"),
-                            str(file_path.parent / f"{file_path.stem}_3.png")
-                        ]
-                        output_paths = [
-                            str(Path(stamped_folder) / f"{file_path.stem}_1.png"),
-                            str(Path(stamped_folder) / f"{file_path.stem}_2.png"),
-                            str(Path(stamped_folder) / f"{file_path.stem}_3.png")
-                        ]
+                        # 실제 저장된 페이지(_1, _2, ...)를 동적으로 수집 (하드코딩 3페이지 제거)
+                        page_paths, output_paths = [], []
+                        for i in range(1, 20):
+                            src = file_path.parent / f"{file_path.stem}_{i}.png"
+                            if not src.exists():
+                                break
+                            page_paths.append(str(src))
+                            output_paths.append(str(Path(stamped_folder) / src.name))
+                        if not page_paths:
+                            logger.warning(f"[{rec.row_no}행] 스탬핑할 PNG 페이지를 찾지 못했습니다: {file_path.parent / file_path.stem}_N.png")
                         from . import png_stamper
                         success = png_stamper.stamp_single_png_set(page_paths, output_paths, logger)
                         if success:
-                            r.consent_stamped_pdf = str(Path(stamped_folder) / file_path.name)
+                            # 실제 저장된 첫 페이지 경로를 기록 (존재하지 않는 합본명 대신)
+                            r.consent_stamped_pdf = output_paths[0]
                     else:
                         stamped_path = Path(stamped_folder) / file_path.name
                         from . import pdf_stamper
                         success = pdf_stamper.stamp_single_pdf(str(file_path), str(stamped_path), logger)
                         if success:
                             r.consent_stamped_pdf = str(stamped_path)
+                else:
+                    r.consent_stamped_pdf = pdf
+
+                # KB스캔 자동 업로드 연동 (Single 모드)
+                kb_scan_enabled = ins_cfg.get("kb_scan_enabled", False)
+                if kb_scan_enabled and r.consent_stamped_pdf:
+                    logger.info(f"[{rec.row_no}행] 동의서 KB스캔 자동 업로드 시작")
+                    try:
+                        scan_success = engine.upload_to_kb_scan(r.consent_stamped_pdf)
+                        if scan_success:
+                            r.kb_scan_status = SUCCESS
+                            logger.info(f"[{rec.row_no}행] 동의서 KB스캔 자동 업로드 성공")
+                        else:
+                            r.kb_scan_status = FAIL
+                            r.kb_scan_reason = "업로드 실패"
+                            logger.error(f"[{rec.row_no}행] 동의서 KB스캔 자동 업로드 실패")
+                    except Exception as scan_err:
+                        r.kb_scan_status = FAIL
+                        r.kb_scan_reason = str(scan_err)
+                        logger.error(f"[{rec.row_no}행] 동의서 KB스캔 중 오류 발생: {scan_err}")
 
     # 3) 전체 상태 산정
     stage_statuses = [_get_stage_status(r, st) for st in stages]
@@ -405,51 +426,91 @@ def _process_chunk(chunk, stages, engines, dedups, run, shot_folder, logger, dry
                 })
                 
             file_format = config.get("insurance", {}).get("oz", {}).get("file_format", "PDF")
+            ins_cfg = config["insurance"]  # for loop 전에 정의 (NameError 방지)
             batch_results = engines[STAGE_INSURANCE].register_and_consent_batch(batch_data, file_format)
-            
+
             # 결과 맵핑 및 스탬핑
             for b_res in batch_results:
                 rec_row = b_res["row_no"]
                 r = chunk_results[rec_row]
-                
+
                 _set_stage(r, STAGE_INSURANCE, b_res["status"], b_res.get("reason", ""))
                 if b_res["status"] == SUCCESS:
                     pdf_path_str = b_res["pdf_path"]
                     r.consent_pdf = pdf_path_str
-                    
+
                     # 스탬핑 연동
-                    ins_cfg = config["insurance"]
                     stamping_enabled = ins_cfg.get("stamping_enabled", True)
                     if stamping_enabled and pdf_path_str:
                         stamped_folder = ins_cfg.get("pdf_stamped_folder", "./output/consent_pdfs_stamped")
                         from pathlib import Path
                         file_path = Path(pdf_path_str)
-                        
+
                         logger.info(f"[{rec_row}행] 동의서 자동 서명 및 스탬핑 시작")
                         if file_path.suffix.lower() == ".png":
-                            page_paths = [
-                                str(file_path.parent / f"{file_path.stem}_1.png"),
-                                str(file_path.parent / f"{file_path.stem}_2.png"),
-                                str(file_path.parent / f"{file_path.stem}_3.png")
-                            ]
-                            output_paths = [
-                                str(Path(stamped_folder) / f"{file_path.stem}_1.png"),
-                                str(Path(stamped_folder) / f"{file_path.stem}_2.png"),
-                                str(Path(stamped_folder) / f"{file_path.stem}_3.png")
-                            ]
+                            # 실제 저장된 페이지(_1, _2, ...)를 동적으로 수집 (하드코딩 3페이지 제거)
+                            page_paths, output_paths = [], []
+                            for i in range(1, 20):
+                                src = file_path.parent / f"{file_path.stem}_{i}.png"
+                                if not src.exists():
+                                    break
+                                page_paths.append(str(src))
+                                output_paths.append(str(Path(stamped_folder) / src.name))
+                            if not page_paths:
+                                logger.warning(f"[{rec_row}행] 스탬핑할 PNG 페이지를 찾지 못했습니다: {file_path.parent / file_path.stem}_N.png")
                             from . import png_stamper
                             success = png_stamper.stamp_single_png_set(page_paths, output_paths, logger)
                             if success:
-                                r.consent_stamped_pdf = str(Path(stamped_folder) / file_path.name)
+                                # 실제 저장된 첫 페이지 경로를 기록 (존재하지 않는 합본명 대신)
+                                r.consent_stamped_pdf = output_paths[0]
                         else:
                             stamped_path = Path(stamped_folder) / file_path.name
                             from . import pdf_stamper
                             success = pdf_stamper.stamp_single_pdf(str(file_path), str(stamped_path), logger)
                             if success:
                                 r.consent_stamped_pdf = str(stamped_path)
-                                
+                    else:
+                        r.consent_stamped_pdf = pdf_path_str
+
                     # 등록 성공 마크
                     dedups[STAGE_INSURANCE].mark_registered(r.phone)
+
+            # KB스캔 자동 업로드 연동 (Batch 모드)
+            kb_scan_enabled = ins_cfg.get("kb_scan_enabled", False)
+            if kb_scan_enabled:
+                stamped_paths = []
+                row_map = {}
+                for rec in chunk:
+                    r = chunk_results[rec.row_no]
+                    if r.insurance_status == SUCCESS and r.consent_stamped_pdf:
+                        stamped_paths.append(r.consent_stamped_pdf)
+                        row_map[r.consent_stamped_pdf] = rec.row_no
+                
+                if stamped_paths:
+                    logger.info(f"배치 완료 고객 {len(stamped_paths)}명에 대해 KB스캔 일괄 업로드 시작...")
+                    try:
+                        engine = engines.get(STAGE_INSURANCE)
+                        if engine:
+                            scan_success = engine.upload_to_kb_scan(stamped_paths)
+                            if scan_success:
+                                logger.info("배치 KB스캔 일괄 업로드 성공")
+                                for path in stamped_paths:
+                                    row_no = row_map[path]
+                                    chunk_results[row_no].kb_scan_status = SUCCESS
+                            else:
+                                logger.error("배치 KB스캔 일괄 업로드 실패")
+                                for path in stamped_paths:
+                                    row_no = row_map[path]
+                                    chunk_results[row_no].kb_scan_status = FAIL
+                                    chunk_results[row_no].kb_scan_reason = "일괄 업로드 실패"
+                        else:
+                            logger.error("보험사 엔진이 없어 KB스캔을 진행할 수 없습니다.")
+                    except Exception as scan_err:
+                        logger.error(f"배치 KB스캔 일괄 업로드 중 오류 발생: {scan_err}")
+                        for path in stamped_paths:
+                            row_no = row_map[path]
+                            chunk_results[row_no].kb_scan_status = FAIL
+                            chunk_results[row_no].kb_scan_reason = str(scan_err)
                     
     # 3) 전체 상태 산정 및 누적
     for rec in chunk:

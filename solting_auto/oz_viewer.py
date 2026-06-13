@@ -134,6 +134,23 @@ def _find_oz_window(oz_cfg, logger):
     raise OzError("OZ 리포트 뷰어 창을 찾지 못했습니다(출력이 OZ 뷰어로 뜨지 않았거나 제목 키워드 불일치).")
 
 
+def oz_window_exists(oz_cfg) -> bool:
+    """OZ 리포트 뷰어 창이 현재 떠 있는지 즉시(비차단) 확인. (출력 후 차단모달 vs OZ뷰어 동시 감시용)"""
+    try:
+        from pywinauto import Desktop
+        keywords = oz_cfg.get("window_title_keywords", ["오즈 리포트 뷰어", "OZ Report", "리포트 뷰어"])
+        for w in Desktop(backend="uia").windows():
+            try:
+                title = w.window_text() or ""
+            except Exception:
+                continue
+            if any(k in title for k in keywords):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _print_to_pdf(oz_win, dest: Path, oz_cfg, logger, send_keys, Desktop):
     printer = oz_cfg.get("printer_name", "Microsoft Print to PDF")
     dlg_timeout = oz_cfg.get("dialog_timeout_sec", 15)
@@ -327,17 +344,88 @@ def _click_button(dlg, names):
     return False
 
 
+def normalize_png_pages(dest: Path, logger=None) -> bool:
+    """OZ가 저장한 동의서 PNG 페이지 파일명을 표준형(canonical) {stem}_1.png, {stem}_2.png ... 로 정규화한다.
+
+    OZ 뷰어 'Disk File' PNG 저장의 실제 규칙:
+      - 1페이지     : {stem}.png        (페이지 접미사 없음)
+      - N페이지(N>=2): {stem}_{N}_1.png  (예: 동의서_홍길동_1234_2_1.png)
+    일부 환경의 무언더스코어 변형({stem}1.png, {stem}2.png ...)도 함께 처리한다.
+
+    정규화 후 다운스트림(검증/스탬핑/배치분할/EDMS 업로드)이 일관되게 {stem}_N.png 를 사용하도록 한다.
+    반환값: 정규화 후 {stem}_1.png 가 존재하면 True.
+    """
+    stem, parent = dest.stem, dest.parent
+    canonical1 = parent / f"{stem}_1.png"
+    if canonical1.exists() and canonical1.stat().st_size > 0:
+        return True  # 이미 정규화됨
+
+    pages = []  # (page_no, path)
+    base = parent / f"{stem}.png"
+    if base.exists() and base.stat().st_size > 0:
+        pages.append((1, base))
+        for n in range(2, 400):
+            pN = parent / f"{stem}_{n}_1.png"
+            if pN.exists():
+                pages.append((n, pN))
+            else:
+                break
+
+    if not pages:
+        # 무언더스코어 변형 폴백: {stem}1.png, {stem}2.png ...
+        alt1 = parent / f"{stem}1.png"
+        if alt1.exists() and alt1.stat().st_size > 0:
+            for i in range(1, 400):
+                s = parent / f"{stem}{i}.png"
+                if s.exists():
+                    pages.append((i, s))
+                else:
+                    break
+
+    if not pages:
+        return False
+
+    pages.sort(key=lambda x: x[0])
+    for idx, (_, src) in enumerate(pages, start=1):
+        target = parent / f"{stem}_{idx}.png"
+        try:
+            if src.resolve() == target.resolve():
+                continue
+            if target.exists():
+                target.unlink()
+            src.rename(target)
+        except Exception as e:
+            if logger:
+                logger.warning(f"PNG 페이지 정규화 실패({src.name} -> {target.name}): {e}")
+
+    ok = canonical1.exists() and canonical1.stat().st_size > 0
+    if logger and ok:
+        logger.info(f"OZ PNG 페이지 정규화 완료: {len(pages)}장 -> {stem}_1..{len(pages)}.png")
+    return ok
+
+
 def _verify(dest: Path) -> str:
-    deadline = time.time() + 10
+    deadline = time.time() + 30
     is_png = dest.suffix.lower() == ".png"
     while time.time() < deadline:
         import solting_auto
         solting_auto.check_stop()
 
         if is_png:
-            first_page = dest.parent / f"{dest.stem}_1.png"
-            if first_page.exists() and first_page.stat().st_size > 0:
-                return str(dest)
+            # 1페이지(=base 또는 정규화된 _1)가 나타나면, 나머지 페이지가 모두 기록될 때까지
+            # 파일 개수가 안정될 때를 기다린 뒤 표준형으로 정규화한다.
+            base = dest
+            canonical1 = dest.parent / f"{dest.stem}_1.png"
+            if (base.exists() and base.stat().st_size > 0) or (canonical1.exists() and canonical1.stat().st_size > 0):
+                prev = -1
+                for _ in range(25):  # 최대 ~5초 안정화(배치 다페이지 대비)
+                    cur = len(list(dest.parent.glob(f"{dest.stem}*.png")))
+                    if cur == prev:
+                        break
+                    prev = cur
+                    time.sleep(0.2)
+                if normalize_png_pages(dest):
+                    return str(dest)
         else:
             if dest.exists() and dest.stat().st_size > 0:
                 return str(dest)

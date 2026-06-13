@@ -96,6 +96,31 @@ class Signaler(QtCore.QObject):
     finished_signal = QtCore.pyqtSignal(bool, str, str) # success, msg, report_url
 
 
+def _attach_file_log(logger, config):
+    """자동화 로거에 디스크 파일 핸들러(output/run.log, 민감정보 마스킹)를 부착하고 반환.
+    GUI 실행 시에도 로그가 파일로 남아 사후 진단이 가능하도록 한다."""
+    try:
+        from solting_auto.logger import MaskingFilter
+        out_dir = Path((config or {}).get("run", {}).get("output_folder", str(APP_DIR / "output")))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        fh = logging.FileHandler(out_dir / "run.log", encoding="utf-8")
+        fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        fh.addFilter(MaskingFilter())
+        logger.addHandler(fh)
+        return fh
+    except Exception:
+        return None
+
+
+def _detach_file_log(logger, fh):
+    if fh is not None:
+        try:
+            logger.removeHandler(fh)
+            fh.close()
+        except Exception:
+            pass
+
+
 class PyQtLogHandler(logging.Handler):
     def __init__(self, signaler):
         super().__init__()
@@ -155,6 +180,9 @@ class AutomationWorker(QtCore.QThread):
         handler = PyQtLogHandler(self.signaler)
         handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
         logger.addHandler(handler)
+
+        # 디스크 파일 로깅(진단용): output/run.log (민감정보 마스킹)
+        file_handler = _attach_file_log(logger, self.config)
 
         def progress_cb(done, total, last_result):
             self.signaler.progress_signal.emit(done, total, f"[{last_result.row_no}행] {last_result.status}")
@@ -243,7 +271,8 @@ class AutomationWorker(QtCore.QThread):
             if not is_stopped:
                 try:
                     import pyautogui
-                    shot_path = ROOT / "output" / f"error_{self.log_id}.png"
+                    out_dir = Path(self.config.get("run", {}).get("output_folder", str(APP_DIR / "output")))
+                    shot_path = out_dir / f"error_{self.log_id}.png"
                     shot_path.parent.mkdir(parents=True, exist_ok=True)
                     pyautogui.screenshot(str(shot_path))
                     
@@ -276,6 +305,7 @@ class AutomationWorker(QtCore.QThread):
         finally:
             self.polling_active = False
             logger.removeHandler(handler)
+            _detach_file_log(logger, file_handler)
 
     def _poll_stop_status(self):
         """ light background polling to check if admin requested stop from Supabase """
@@ -317,6 +347,9 @@ class EDMSUploadWorker(QtCore.QThread):
         handler = PyQtLogHandler(self.signaler)
         handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
         logger.addHandler(handler)
+
+        # 디스크 파일 로깅(진단용): output/run.log (민감정보 마스킹)
+        file_handler = _attach_file_log(logger, self.config)
 
         def progress_cb(done, total, last_msg):
             self.signaler.progress_signal.emit(done, total, last_msg)
@@ -401,6 +434,7 @@ class EDMSUploadWorker(QtCore.QThread):
         finally:
             self.polling_active = False
             logger.removeHandler(handler)
+            _detach_file_log(logger, file_handler)
 
     def _poll_stop_status(self):
         """ light background polling to check if admin requested stop from Supabase """
@@ -851,11 +885,14 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         self.check_insurance.setChecked(True)
         self.check_stamping = QtWidgets.QCheckBox("🖊️ 스탬프")
         self.check_stamping.setChecked(True)
+        self.check_kb_scan = QtWidgets.QCheckBox("4단계")
+        self.check_kb_scan.setChecked(False)
         self.check_dry_run = QtWidgets.QCheckBox("Dry-Run")
         
         options_layout.addWidget(self.check_solting)
         options_layout.addWidget(self.check_insurance)
         options_layout.addWidget(self.check_stamping)
+        options_layout.addWidget(self.check_kb_scan)
         options_layout.addWidget(self.check_dry_run)
         step3_layout.addLayout(options_layout)
 
@@ -1477,11 +1514,14 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         self.edms_pdf_paths = []
         folder = Path(folder_path)
         if folder.exists() and folder.is_dir():
-            pdfs = sorted(folder.glob("*.pdf"), key=lambda p: p.name)
-            for p in pdfs:
+            files = []
+            for ext in ["*.pdf", "*.png"]:
+                files.extend(folder.glob(ext))
+            files = sorted(files, key=lambda p: p.name)
+            for p in files:
                 self.list_edms_files.addItem(f"📄 {p.name} ({p.stat().st_size // 1024} KB)")
                 self.edms_pdf_paths.append(str(p.resolve()))
-            self.log_edms_message(f"[스캔] {len(self.edms_pdf_paths)}개의 PDF 파일을 감지했어요.")
+            self.log_edms_message(f"[스캔] {len(self.edms_pdf_paths)}개의 파일을 감지했어요.")
 
     # --- Step 1 & 2 Logic ---
     def open_edge_browser(self):
@@ -1615,6 +1655,8 @@ class KkandoriAgent(QtWidgets.QMainWindow):
             self.input_pdf_folder.setText(str(Path(pdf_folder).resolve()))
             self.input_pdf_stamped_folder.setText(str(Path(pdf_stamped_folder).resolve()))
             self.check_stamping.setChecked(stamping_enabled)
+            kb_scan_enabled = cfg.get("insurance", {}).get("kb_scan_enabled", False)
+            self.check_kb_scan.setChecked(kb_scan_enabled)
             
             # 입력 방식 로드
             input_mode = cfg.get("insurance", {}).get("input_mode", "single")
@@ -1868,7 +1910,7 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         config["insurance"]["pdf_folder"] = self.input_pdf_folder.text().strip() or str(APP_DIR / "output" / "consent_pdfs")
         config["insurance"]["pdf_stamped_folder"] = self.input_pdf_stamped_folder.text().strip() or str(APP_DIR / "output" / "consent_pdfs_stamped")
         config["insurance"]["stamping_enabled"] = self.check_stamping.isChecked()
-        config["insurance"]["kb_scan_enabled"] = True
+        config["insurance"]["kb_scan_enabled"] = self.check_kb_scan.isChecked()
         
         if "browser" not in config["insurance"]:
             config["insurance"]["browser"] = {}
