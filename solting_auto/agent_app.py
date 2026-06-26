@@ -498,6 +498,84 @@ class CalibrateWorker(QtCore.QThread):
             self.finished_signal.emit(False, {}, f"로컬 웹 서버가 기동되어 있지 않습니다. 먼저 웹 서버를 실행해 주세요.\n({e})")
 
 
+class CustomerCrawlWorker(QtCore.QThread):
+    """KB 보장분석 고객 데이터 수집 + Supabase 고객DB 업로드 워커."""
+    log_signal = QtCore.pyqtSignal(str)
+    progress_signal = QtCore.pyqtSignal(int, int, str)
+    rows_signal = QtCore.pyqtSignal(list)            # 미리보기용 정규화 행
+    finished_signal = QtCore.pyqtSignal(bool, str, int)  # success, msg, saved_count
+
+    def __init__(self, cdp_url, tenant_id, device_id, supabase_client, dump_path):
+        super().__init__()
+        self.cdp_url = cdp_url
+        self.tenant_id = tenant_id
+        self.device_id = device_id
+        self.supabase = supabase_client
+        self.dump_path = dump_path
+        self.stop_requested = False
+
+    def run(self):
+        logger = logging.getLogger("kkandori_crawl")
+        logger.setLevel(logging.INFO)
+        handler = PyQtLogHandler(self)  # self.log_signal 로 라우팅
+        handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+        logger.addHandler(handler)
+        saved = 0
+        try:
+            from solting_auto import kb_crawler
+            records = kb_crawler.crawl_customers(
+                cdp_url=self.cdp_url,
+                logger=logger,
+                progress_cb=lambda d, t, m: self.progress_signal.emit(d, t, m),
+                stop_cb=lambda: self.stop_requested,
+                dump_path=self.dump_path,
+            )
+
+            self.rows_signal.emit(records or [])
+
+            if self.stop_requested:
+                self.finished_signal.emit(False, "사용자 중단 요청으로 수집을 멈췄습니다.", 0)
+                return
+            if not records:
+                self.finished_signal.emit(
+                    False,
+                    "수집된 고객 데이터가 없습니다.\nKB 보장분석 화면에서 '조회'를 실행한 상태로 다시 시도해 주세요.\n(원본 응답 덤프가 output 폴더에 저장되었습니다.)",
+                    0,
+                )
+                return
+
+            # 서버 업로드 (100건씩 일괄 upsert)
+            CHUNK = 100
+            total = len(records)
+            for i in range(0, total, CHUNK):
+                if self.stop_requested:
+                    break
+                chunk = records[i:i + CHUNK]
+                try:
+                    res = self.supabase.rpc("upsert_customer_records_via_device", {
+                        "p_tenant_id": self.tenant_id,
+                        "p_device_id": self.device_id,
+                        "p_records": chunk,
+                    }).execute()
+                    n = res.data if isinstance(res.data, int) else len(chunk)
+                    saved += (n or 0)
+                    self.progress_signal.emit(min(i + CHUNK, total), total, f"서버 고객DB 저장 {saved}건")
+                except Exception as up_err:
+                    logger.error(f"[수집] 서버 저장 실패: {up_err}")
+                    self.finished_signal.emit(False, f"서버 업로드 실패: {up_err}", saved)
+                    return
+
+            self.finished_signal.emit(True, f"고객 {saved}건을 어드민 고객DB에 저장했습니다. 🎉", saved)
+        except Exception as e:
+            logger.error(f"[수집] 오류: {e}")
+            self.finished_signal.emit(False, f"수집 중 오류가 발생했습니다:\n{e}", saved)
+        finally:
+            try:
+                logger.removeHandler(handler)
+            except Exception:
+                pass
+
+
 class KkandoriAgent(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
@@ -562,7 +640,13 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         self.tabs.addTab(self.tab_settings, "⚙️ 설정")
         self.tabs.setTabEnabled(2, False)
 
-        # Tab 4: User Guides (Always enabled so users can read before authentication)
+        # Tab 4: Customer DB Crawl (KB 보장분석 수집)
+        self.tab_customerdb = QtWidgets.QWidget()
+        self.init_customerdb_tab()
+        self.tabs.addTab(self.tab_customerdb, "🗂️ 고객DB 수집")
+        self.tabs.setTabEnabled(3, False)
+
+        # Tab 5: User Guides (Always enabled so users can read before authentication)
         self.tab_guide = QtWidgets.QWidget()
         self.init_guide_tab()
         self.tabs.addTab(self.tab_guide, "📖 사용 가이드")
@@ -1418,6 +1502,7 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         # Enable all tabs
         self.tabs.setTabEnabled(1, True)
         self.tabs.setTabEnabled(2, True)
+        self.tabs.setTabEnabled(3, True)  # 고객DB 수집
         self.tabs.setCurrentIndex(1) # Auto jump to Solting automation
 
         # Start heartbeats
@@ -1434,6 +1519,7 @@ class KkandoriAgent(QtWidgets.QMainWindow):
     def disable_all_tabs(self):
         self.tabs.setTabEnabled(1, False)
         self.tabs.setTabEnabled(2, False)
+        self.tabs.setTabEnabled(3, False)
 
     def load_local_pin(self):
         pin_file = APP_DIR / ".pin"
@@ -1707,6 +1793,148 @@ class KkandoriAgent(QtWidgets.QMainWindow):
             if self.btn_track_mouse.text() == "📡 마우스 좌표 추적 시작":
                 if self.mouse_tracker.isRunning():
                     self.mouse_tracker.stop()
+
+    # ── 고객DB 수집 탭 (KB 보장분석 수집) ─────────────────────────────
+    def init_customerdb_tab(self):
+        layout = QtWidgets.QVBoxLayout(self.tab_customerdb)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+
+        title = QtWidgets.QLabel("🗂️ KB 보장분석 고객DB 수집")
+        title.setFont(QtGui.QFont("Malgun Gothic", 14, QtGui.QFont.Weight.Bold))
+        title.setStyleSheet("color: white;")
+        layout.addWidget(title)
+
+        desc = QtWidgets.QLabel(
+            "KB전산에 로그인된 본인 세션의 '보장분석' 화면에 표시되는 담당 고객 데이터를 수집해\n"
+            "어드민 서버의 '고객DB' 메뉴에 정리합니다. (고객명·생년월일·나이·성별·월보험료·가입건수·동의종료일 등)"
+        )
+        desc.setStyleSheet("color: #94a3b8; font-size: 10pt;")
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
+
+        notice = QtWidgets.QLabel(
+            "⚠️ 수집 대상은 개인신용정보입니다. 본인 담당 고객에 한해 신용정보법·개인정보보호법을 준수하여 사용하세요."
+        )
+        notice.setStyleSheet("color: #f59e0b; font-size: 9pt; background:#1e293b; border:1px solid #334155; border-radius:6px; padding:6px;")
+        notice.setWordWrap(True)
+        layout.addWidget(notice)
+
+        guide = QtWidgets.QLabel(
+            "사용법: ① KB전산 보장분석 화면을 열고 '조회'로 고객 목록을 띄웁니다 →\n"
+            "② 아래 '고객DB 수집 시작'을 누르면 화면 데이터를 자동 수집·저장합니다."
+        )
+        guide.setStyleSheet("color: #64748b; font-size: 9pt;")
+        guide.setWordWrap(True)
+        layout.addWidget(guide)
+
+        # 버튼 줄
+        btn_row = QtWidgets.QHBoxLayout()
+        self.btn_crawl_start = QtWidgets.QPushButton("▶️ 고객DB 수집 시작")
+        self.btn_crawl_start.setFixedHeight(40)
+        self.btn_crawl_start.setStyleSheet("background-color: #2563eb; color: white; border-radius: 8px; font-weight: bold;")
+        self.btn_crawl_start.clicked.connect(self.start_customer_crawl)
+
+        self.btn_crawl_stop = QtWidgets.QPushButton("🛑 중단")
+        self.btn_crawl_stop.setFixedHeight(40)
+        self.btn_crawl_stop.setStyleSheet("background-color: #ef4444; color: white; border-radius: 8px;")
+        self.btn_crawl_stop.setEnabled(False)
+        self.btn_crawl_stop.clicked.connect(self.stop_customer_crawl)
+
+        btn_row.addWidget(self.btn_crawl_start, 3)
+        btn_row.addWidget(self.btn_crawl_stop, 1)
+        layout.addLayout(btn_row)
+
+        # 진행률
+        self.crawl_progress = QtWidgets.QProgressBar()
+        self.crawl_progress.setValue(0)
+        layout.addWidget(self.crawl_progress)
+
+        # 결과 미리보기 표 (한국어 헤더)
+        self.crawl_headers = ["고객명", "생년월일", "나이", "성별", "월보험료", "가입건수", "동의종료일", "분석일자"]
+        self.crawl_table = QtWidgets.QTableWidget(0, len(self.crawl_headers))
+        self.crawl_table.setHorizontalHeaderLabels(self.crawl_headers)
+        self.crawl_table.horizontalHeader().setStretchLastSection(True)
+        self.crawl_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.crawl_table.setStyleSheet("background:#0f172a; color:#e2e8f0; gridline-color:#334155;")
+        self.crawl_table.setMinimumHeight(180)
+        layout.addWidget(self.crawl_table, 1)
+
+        # 로그 콘솔
+        self.crawl_console = QtWidgets.QTextEdit()
+        self.crawl_console.setReadOnly(True)
+        self.crawl_console.setMaximumHeight(140)
+        self.crawl_console.setStyleSheet("background:#0b1220; color:#9ca3af; font-family:Consolas; font-size:9pt;")
+        layout.addWidget(self.crawl_console)
+
+        self.customer_crawl_worker = None
+
+    def start_customer_crawl(self):
+        if not (self.tenant and self.device):
+            QtWidgets.QMessageBox.warning(self, "인증 필요", "먼저 기기 인증(로그인)을 완료해 주세요.")
+            return
+        try:
+            out_dir = APP_DIR / "output"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            dump_path = str(out_dir / "bojang_capture.log")
+        except Exception:
+            dump_path = None
+
+        self.btn_crawl_start.setEnabled(False)
+        self.btn_crawl_start.setText("수집 중...")
+        self.btn_crawl_stop.setEnabled(True)
+        self.crawl_console.clear()
+        self.crawl_table.setRowCount(0)
+        self.crawl_progress.setValue(0)
+
+        self.customer_crawl_worker = CustomerCrawlWorker(
+            "http://localhost:9222",
+            self.tenant["id"],
+            self.device["id"],
+            self.supabase,
+            dump_path,
+        )
+        self.customer_crawl_worker.log_signal.connect(self._crawl_log)
+        self.customer_crawl_worker.progress_signal.connect(self._crawl_progress)
+        self.customer_crawl_worker.rows_signal.connect(self._crawl_fill_table)
+        self.customer_crawl_worker.finished_signal.connect(self._crawl_finished)
+        self.customer_crawl_worker.start()
+
+    def stop_customer_crawl(self):
+        if self.customer_crawl_worker and self.customer_crawl_worker.isRunning():
+            self.btn_crawl_stop.setEnabled(False)
+            self.btn_crawl_stop.setText("중단 중...")
+            self.customer_crawl_worker.stop_requested = True
+
+    def _crawl_log(self, msg):
+        self.crawl_console.append(msg)
+        self.crawl_console.moveCursor(QtGui.QTextCursor.MoveOperation.End)
+
+    def _crawl_progress(self, done, total, msg):
+        self.crawl_progress.setMaximum(max(total, 1))
+        self.crawl_progress.setValue(done)
+        if msg:
+            self._crawl_log(f"[진행] {done}/{total} - {msg}")
+
+    def _crawl_fill_table(self, rows):
+        keys = ["customer_name", "birth", "age", "gender", "monthly_premium",
+                "policy_count", "consent_end_date", "analysis_date"]
+        self.crawl_table.setRowCount(len(rows))
+        for r, rec in enumerate(rows):
+            for c, k in enumerate(keys):
+                val = rec.get(k)
+                self.crawl_table.setItem(r, c, QtWidgets.QTableWidgetItem("" if val is None else str(val)))
+
+    def _crawl_finished(self, success, msg, count):
+        self.btn_crawl_start.setEnabled(True)
+        self.btn_crawl_start.setText("▶️ 고객DB 수집 시작")
+        self.btn_crawl_stop.setEnabled(False)
+        self.btn_crawl_stop.setText("🛑 중단")
+        if success:
+            QtWidgets.QMessageBox.information(self, "수집 완료", msg)
+        else:
+            QtWidgets.QMessageBox.warning(self, "수집 안내", msg)
+        self.customer_crawl_worker = None
 
     def load_initial_values(self):
         # [좌표 반영 버그 수정] 매크로가 읽는 edms_config.json 의 좌표/딜레이를 설정 탭 스핀박스에 로드해

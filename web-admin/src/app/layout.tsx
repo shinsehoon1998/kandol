@@ -124,11 +124,17 @@ export default function RootLayout({
                 >
                   💻 라이선스 기기 승인
                 </Link>
-                <Link 
-                  href="/logs" 
+                <Link
+                  href="/logs"
                   className={`flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-semibold transition-colors ${pathname === '/logs' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}
                 >
                   📜 전산 감사 로그
+                </Link>
+                <Link
+                  href="/customers"
+                  className={`flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-semibold transition-colors ${pathname === '/customers' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}
+                >
+                  👥 고객DB
                 </Link>
                 <a 
                   href="https://github.com/shinsehoon1998/kandol/releases/download/v1.3.0/Kkandori.zip" 
