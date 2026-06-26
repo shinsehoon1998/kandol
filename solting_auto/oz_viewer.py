@@ -237,6 +237,14 @@ def _save_via_viewer(oz_win, dest: Path, oz_cfg, logger, send_keys, Desktop, fil
         except Exception as key_err:
             raise OzError(f"저장 경로(1209) 입력 불가능: {key_err}")
 
+    # 3.5) PNG 저장 비율(확대/축소 %) 옵션 적용 — KB EDMS 스캔 인식률 향상용
+    #      저장 dialog '확인' 누르기 전에 옵션 → PNG 저장 옵션 탭 → 비율 설정 → 확인
+    if "PNG" in str(actual_fmt).upper() and oz_cfg.get("save_ratio_enabled"):
+        try:
+            _apply_png_save_ratio(dlg, oz_cfg, logger, send_keys, Desktop)
+        except Exception as ratio_err:
+            logger.warning(f"[PNG 저장 비율] 적용 실패(저장은 계속 진행, 인식률 저하 가능): {ratio_err}")
+
     # 4) 확인 버튼(AutoID: 1) 클릭하여 완료
     try:
         ok_btn = dlg.child_window(auto_id="1", control_type="Button")
@@ -251,6 +259,114 @@ def _save_via_viewer(oz_win, dest: Path, oz_cfg, logger, send_keys, Desktop, fil
     send_keys("%y")
 
     return _verify(dest)
+
+
+# ── PNG 저장 비율(확대/축소 %) 옵션 자동 설정 ──────────────────────────
+# 저장 옵션 창은 데스크톱 Windows 대화상자(KB 웹보안 무관) → pywinauto 로 직접 제어.
+# 정확한 컨트롤 식별자는 tools/inspect_save_option.py 라이브 점검으로 확정 후 보정.
+_PNG_OPTION_TITLES = ["저장 옵션", "PNG 저장 옵션", "Save Option", "Save Options", "옵션"]
+
+
+def _apply_png_save_ratio(save_dlg, oz_cfg, logger, send_keys, Desktop):
+    """저장 dialog에서 '옵션' → '저장 옵션' 창 → 'PNG 저장 옵션' 탭 → '확대/축소 비율' 설정 → '확인'.
+    실패 시 예외를 올려 호출부에서 soft-fail(저장 계속) 처리한다."""
+    ratio = int(oz_cfg.get("save_ratio", 160))
+    dlg_timeout = oz_cfg.get("dialog_timeout_sec", 15)
+
+    # 1) 저장 dialog의 '옵션' 버튼 클릭
+    if not _click_button(save_dlg, ["옵션", "옵션...", "옵션(O)", "Option", "Options"]):
+        # auto_id 폴백(점검 후 실제값으로 교체 가능)
+        clicked = False
+        for aid in ("1037", "1036", "1038"):
+            try:
+                btn = save_dlg.child_window(auto_id=aid, control_type="Button")
+                if btn.exists():
+                    btn.click_input(); clicked = True
+                    logger.info(f"[PNG 저장 비율] '옵션' 버튼 클릭(auto_id={aid})")
+                    break
+            except Exception:
+                continue
+        if not clicked:
+            raise OzError("'옵션' 버튼을 찾지 못했습니다.")
+    else:
+        logger.info("[PNG 저장 비율] '옵션' 버튼 클릭")
+    time.sleep(0.5)
+
+    # 2) '저장 옵션' 창 대기
+    opt_dlg = _wait_dialog(Desktop, _PNG_OPTION_TITLES, dlg_timeout, parent_win=save_dlg)
+    if not opt_dlg:
+        raise OzError("'저장 옵션' 창을 찾지 못했습니다.")
+
+    # 3) 'PNG 저장 옵션' 탭 선택 (TabItem → 폴백: 버튼/텍스트 클릭)
+    try:
+        tab = opt_dlg.child_window(title="PNG 저장 옵션", control_type="TabItem")
+        if tab.exists():
+            tab.select()
+            logger.info("[PNG 저장 비율] 'PNG 저장 옵션' 탭 선택")
+        else:
+            raise Exception("TabItem 미존재")
+    except Exception:
+        if _click_button(opt_dlg, ["PNG 저장 옵션", "PNG 저장 옵션(P)"]):
+            logger.info("[PNG 저장 비율] 'PNG 저장 옵션' 탭 클릭(폴백)")
+        else:
+            logger.warning("[PNG 저장 비율] 'PNG 저장 옵션' 탭을 못 찾음 — 현재 탭에서 비율 설정 시도")
+    time.sleep(0.4)
+
+    # 4) '확대/축소 비율' 스핀박스/Edit 에 값 설정
+    if not _set_spin_value(opt_dlg, ratio, logger, send_keys):
+        raise OzError("'확대/축소 비율' 입력 컨트롤을 찾지 못했습니다.")
+    logger.info(f"[PNG 저장 비율] 확대/축소 비율 = {ratio}% 설정")
+
+    # 5) '저장 옵션' 창 '확인' 클릭
+    time.sleep(0.3)
+    if not _click_button(opt_dlg, ["확인", "OK", "적용", "확인(O)"]):
+        try:
+            ok = opt_dlg.child_window(auto_id="1", control_type="Button")
+            ok.click_input()
+        except Exception:
+            send_keys("{ENTER}")
+    logger.info("[PNG 저장 비율] '저장 옵션' 창 확인")
+    time.sleep(0.4)
+
+
+def _set_spin_value(dlg, value, logger, send_keys) -> bool:
+    """대화상자 내 '확대/축소 비율' 스핀박스(또는 Edit)에 value 를 입력. 성공 시 True.
+    식별자가 환경마다 다를 수 있어 다단계로 시도한다."""
+    # A) auto_id 직접 시도(점검 후 실제값으로 교체 가능)
+    for aid in ("1201", "1202", "1203", "1210"):
+        for ctype in ("Edit", "Spinner"):
+            try:
+                ctrl = dlg.child_window(auto_id=aid, control_type=ctype)
+                if not ctrl.exists():
+                    continue
+                try:
+                    ctrl.set_edit_text(str(value))
+                except Exception:
+                    ctrl.click_input(); send_keys("^a{BACKSPACE}"); send_keys(str(value))
+                logger.info(f"[PNG 저장 비율] 비율 입력 성공(auto_id={aid}, {ctype})")
+                return True
+            except Exception:
+                continue
+
+    # B) 대화상자 내 Edit/Spinner 자손을 순회하며 첫 입력 가능한 컨트롤에 기입
+    try:
+        for ctype in ("Edit", "Spinner"):
+            for ctrl in dlg.descendants(control_type=ctype):
+                try:
+                    if not ctrl.is_visible() or not ctrl.is_enabled():
+                        continue
+                    try:
+                        ctrl.set_edit_text(str(value))
+                    except Exception:
+                        ctrl.click_input(); send_keys("^a{BACKSPACE}"); send_keys(str(value))
+                    logger.info(f"[PNG 저장 비율] 비율 입력 성공(자손 {ctype} 순회)")
+                    return True
+                except Exception:
+                    continue
+    except Exception as e:
+        logger.debug(f"[PNG 저장 비율] 자손 순회 실패: {e}")
+
+    return False
 
 
 def _select_printer(print_dlg, printer_name, logger):

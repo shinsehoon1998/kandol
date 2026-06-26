@@ -154,13 +154,44 @@ def process_file(xlsx_path: str, config: dict, logger, dry_run: bool = False,
                 _process_chunk(current_chunk, stages, engines, dedups, run, shot_folder, logger, dry_run, config, summary, progress_cb, len(records))
 
         else:
+            # ── 50명 단위 자동 폴더링 설정 (KB 스캔 렉 완화용) ──
+            ins_cfg = config.get("insurance", {})
+            auto_folder_enabled = bool(ins_cfg.get("auto_folder_enabled", False))
+            try:
+                folder_interval = int(ins_cfg.get("auto_folder_interval", 50))
+            except (TypeError, ValueError):
+                folder_interval = 50
+            if folder_interval <= 0:
+                if auto_folder_enabled:
+                    logger.warning(f"폴더링 분할 인원이 비정상({folder_interval}) → 폴더링 비활성 처리")
+                auto_folder_enabled = False
+            run_date = datetime.now().strftime("%Y%m%d")
+            ins_engine = engines.get(STAGE_INSURANCE)
+            pdf_base = Path(ins_cfg.get("pdf_folder", "./output/consent_pdfs"))
+            stamped_base = Path(ins_cfg.get("pdf_stamped_folder", "./output/consent_pdfs_stamped"))
+            success_count = 0
+            if auto_folder_enabled:
+                logger.info(f"[폴더링] 성공 {folder_interval}명 단위로 '날짜_조번호' 하위폴더 자동 분산 (날짜={run_date})")
+
             for rec in records:
                 if stop_check_cb and stop_check_cb():
                     logger.info("작업 중단 신호가 감지되어 루프 처리를 중지합니다.")
                     raise RuntimeError("사용자 중단 요청")
 
+                # 현재 고객을 저장할 조 하위폴더를 처리 전에 지정 (원본=engine.pdf_dir, 스탬프=override)
+                stamped_override = None
+                if auto_folder_enabled:
+                    jo = success_count // folder_interval + 1
+                    sub = f"{run_date}_{jo}"
+                    if ins_engine is not None:
+                        ins_engine.pdf_dir = pdf_base / sub
+                    stamped_override = str(stamped_base / sub)
+
                 res = _process_row(rec, stages, engines, dedups, run, use_checksum,
-                                   shot_folder, logger, dry_run)
+                                   shot_folder, logger, dry_run,
+                                   stamped_dir_override=stamped_override)
+                if auto_folder_enabled and res.status == SUCCESS:
+                    success_count += 1
                 summary.add(res)
                 if progress_cb:
                     progress_cb(summary.total, len(records), res)
@@ -221,8 +252,10 @@ def _start_engines(stages, config, logger):
     return engines
 
 
-def _process_row(rec, stages, engines, dedups, run, use_checksum, shot_folder, logger, dry_run):
-    """행 1건을 모든 활성 단계에 대해 처리 -> RowResult."""
+def _process_row(rec, stages, engines, dedups, run, use_checksum, shot_folder, logger, dry_run,
+                 stamped_dir_override=None):
+    """행 1건을 모든 활성 단계에 대해 처리 -> RowResult.
+    stamped_dir_override: 지정 시 스탬프 결과를 이 폴더에 저장(50명 단위 폴더링용)."""
     ts = _now()
     r = RowResult(
         row_no=rec.row_no, jumin=rec.jumin, name=rec.name, phone=rec.phone,
@@ -257,7 +290,7 @@ def _process_row(rec, stages, engines, dedups, run, use_checksum, shot_folder, l
                 ins_cfg = engine.ins
                 stamping_enabled = ins_cfg.get("stamping_enabled", True)
                 if stamping_enabled:
-                    stamped_folder = ins_cfg.get("pdf_stamped_folder", "./output/consent_pdfs_stamped")
+                    stamped_folder = stamped_dir_override or ins_cfg.get("pdf_stamped_folder", "./output/consent_pdfs_stamped")
                     from pathlib import Path
                     file_path = Path(pdf)
                     

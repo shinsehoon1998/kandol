@@ -1,6 +1,45 @@
 import os
 import random
+import struct
 from PIL import Image, ImageDraw
+from PIL.PngImagePlugin import PngInfo
+
+
+def _save_png_preserving(img, out_path, orig_info, logger=None):
+    """스탬프된 PNG를 저장하되 원본의 메타데이터(DPI/pHYs, sRGB, gAMA)를 그대로 유지한다.
+    KB EDMS 스캔은 DPI로 문서의 물리적 비율을 판정하므로 DPI가 사라지면 비율을 다르게
+    해석해 인식이 실패한다. DPI(필수) 외에 sRGB/gAMA 색공간 청크도 원본과 일치시켜
+    스탬프 파일이 원본과 메타데이터상 동일해지도록 한다.
+    """
+    info = orig_info or {}
+    save_kwargs = {}
+
+    # 1) DPI(pHYs) — 비율 인식의 핵심
+    dpi = info.get("dpi")
+    if dpi:
+        save_kwargs["dpi"] = dpi
+
+    # 2) sRGB / gAMA 색공간 청크 복원 (원본과 메타데이터 완전 일치)
+    try:
+        meta = PngInfo()
+        added = False
+        if "srgb" in info:
+            meta.add(b"sRGB", bytes([int(info["srgb"]) & 0xFF]))
+            added = True
+        if "gamma" in info:
+            meta.add(b"gAMA", struct.pack(">I", int(round(float(info["gamma"]) * 100000))))
+            added = True
+        if added:
+            save_kwargs["pnginfo"] = meta
+    except Exception as meta_err:
+        if logger:
+            logger.warning(f"[스탬프] sRGB/gAMA 복원 생략(무시): {meta_err}")
+
+    img.save(out_path, format="PNG", **save_kwargs)
+    if logger:
+        logger.info(f"[스탬프] PNG 저장(메타 보존 dpi={dpi}, srgb={info.get('srgb')}, gamma={info.get('gamma')}): "
+                    f"{os.path.basename(out_path)}")
+
 
 def stamp_single_png_set(page_paths: list, output_paths: list, logger) -> bool:
     """다운로드받은 동의서 PNG 이미지 파일 세트(페이지별 이미지)에 동의함 체크표시 및 서명을 주입하여 다른 폴더에 저장합니다.
@@ -12,6 +51,7 @@ def stamp_single_png_set(page_paths: list, output_paths: list, logger) -> bool:
         # 1페이지 처리
         if len(page_paths) >= 1 and os.path.exists(page_paths[0]):
             img = Image.open(page_paths[0])
+            orig_info = dict(img.info)   # 원본 메타데이터(DPI 등) 캡처
             w, h = img.size
             # PDF 기준 크기 (A4: 595 x 842) 대비 스케일 계산
             sx, sy = w / 595.0, h / 842.0
@@ -22,7 +62,7 @@ def stamp_single_png_set(page_paths: list, output_paths: list, logger) -> bool:
             for cx, cy in p1_coords:
                 _draw_checkmark(draw, cx * sx, cy * sy, sx, sy)
             os.makedirs(os.path.dirname(output_paths[0]), exist_ok=True)
-            img.save(output_paths[0])
+            _save_png_preserving(img, output_paths[0], orig_info, logger)
             saved_count += 1
             logger.info(f"PNG 1페이지 동의함 체크 완료: {os.path.basename(output_paths[0])}")
         elif len(page_paths) >= 1:
@@ -31,6 +71,7 @@ def stamp_single_png_set(page_paths: list, output_paths: list, logger) -> bool:
         # 2페이지 처리
         if len(page_paths) >= 2 and os.path.exists(page_paths[1]):
             img = Image.open(page_paths[1])
+            orig_info = dict(img.info)   # 원본 메타데이터(DPI 등) 캡처
             w, h = img.size
             sx, sy = w / 595.0, h / 842.0
 
@@ -40,7 +81,7 @@ def stamp_single_png_set(page_paths: list, output_paths: list, logger) -> bool:
             for cx, cy in p2_coords:
                 _draw_checkmark(draw, cx * sx, cy * sy, sx, sy)
             os.makedirs(os.path.dirname(output_paths[1]), exist_ok=True)
-            img.save(output_paths[1])
+            _save_png_preserving(img, output_paths[1], orig_info, logger)
             saved_count += 1
             logger.info(f"PNG 2페이지 동의함 체크 완료: {os.path.basename(output_paths[1])}")
         elif len(page_paths) >= 2:
@@ -49,6 +90,7 @@ def stamp_single_png_set(page_paths: list, output_paths: list, logger) -> bool:
         # 3페이지 처리
         if len(page_paths) >= 3 and os.path.exists(page_paths[2]):
             img = Image.open(page_paths[2])
+            orig_info = dict(img.info)   # 원본 메타데이터(DPI 등) 캡처
             w, h = img.size
             sx, sy = w / 595.0, h / 842.0
 
@@ -61,7 +103,7 @@ def stamp_single_png_set(page_paths: list, output_paths: list, logger) -> bool:
             # 서명(인) 란 서명 드로잉
             _draw_signature(draw, 250 * sx, 635 * sy, sx, sy)
             os.makedirs(os.path.dirname(output_paths[2]), exist_ok=True)
-            img.save(output_paths[2])
+            _save_png_preserving(img, output_paths[2], orig_info, logger)
             saved_count += 1
             logger.info(f"PNG 3페이지 동의함 체크 및 필기체 서명 드로잉 완료: {os.path.basename(output_paths[2])}")
         elif len(page_paths) >= 3:

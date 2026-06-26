@@ -896,6 +896,44 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         options_layout.addWidget(self.check_dry_run)
         step3_layout.addLayout(options_layout)
 
+        # PNG 저장 비율 옵션 (KB EDMS 스캔 인식률 향상용 - 확대/축소 비율 160% 이상 권장)
+        ratio_layout = QtWidgets.QHBoxLayout()
+        self.check_save_ratio = QtWidgets.QCheckBox("📐 PNG 저장 비율")
+        self.check_save_ratio.setChecked(False)
+        self.check_save_ratio.setToolTip("PNG 저장 시 OZ 뷰어 '확대/축소 비율'을 자동 설정합니다. KB EDMS 스캔 인식률을 위해 160% 이상 권장.")
+        self.spin_save_ratio = QtWidgets.QSpinBox()
+        self.spin_save_ratio.setRange(100, 400)
+        self.spin_save_ratio.setValue(160)
+        self.spin_save_ratio.setSuffix(" %")
+        self.spin_save_ratio.setMaximumWidth(110)
+        self.spin_save_ratio.setEnabled(False)
+        self.check_save_ratio.stateChanged.connect(
+            lambda s: self.spin_save_ratio.setEnabled(bool(s))
+        )
+        ratio_layout.addWidget(self.check_save_ratio)
+        ratio_layout.addWidget(self.spin_save_ratio)
+        ratio_layout.addStretch()
+        step3_layout.addLayout(ratio_layout)
+
+        # 50명 단위 자동 폴더링 옵션 (KB 스캔 렉 완화용 - 성공 N명마다 날짜_조번호 하위폴더 분산)
+        folder_layout = QtWidgets.QHBoxLayout()
+        self.check_auto_folder = QtWidgets.QCheckBox("📁 50명 단위 폴더링")
+        self.check_auto_folder.setChecked(False)
+        self.check_auto_folder.setToolTip("동의서를 성공 N명 단위로 하위폴더(날짜_조번호)에 자동 분산 저장합니다. KB 스캔 시 렉 완화용.")
+        self.spin_folder_interval = QtWidgets.QSpinBox()
+        self.spin_folder_interval.setRange(1, 1000)
+        self.spin_folder_interval.setValue(50)
+        self.spin_folder_interval.setSuffix(" 명")
+        self.spin_folder_interval.setMaximumWidth(110)
+        self.spin_folder_interval.setEnabled(False)
+        self.check_auto_folder.stateChanged.connect(
+            lambda s: self.spin_folder_interval.setEnabled(bool(s))
+        )
+        folder_layout.addWidget(self.check_auto_folder)
+        folder_layout.addWidget(self.spin_folder_interval)
+        folder_layout.addStretch()
+        step3_layout.addLayout(folder_layout)
+
         # Triggers
         trigger_layout = QtWidgets.QHBoxLayout()
         self.btn_run = QtWidgets.QPushButton("🚀 깐돌이 자동 등록 시작")
@@ -1462,16 +1500,65 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         offsets = {k: spin.value() for k, spin in self.offset_inputs.items()}
         delays = {k: spin.value() for k, spin in self.delay_inputs.items()}
 
+        # [좌표 반영 버그 수정] 매크로(batch_upload_via_win32)는 edms_config.json 을 읽으므로,
+        # 서버뿐 아니라 로컬 edms_config.json 에도 반드시 함께 저장해야 설정이 매크로에 반영된다.
+        self._write_edms_config_json(offsets, delays)
+
         try:
             self.supabase.rpc("save_macro_config_via_device", {
                 "p_tenant_id": self.tenant["id"],
                 "p_offsets": offsets,
                 "p_delays": delays
             }).execute()
-            QtWidgets.QMessageBox.information(self, "성공", "서버에 매크로 설정 저장 완료!")
-            self.log_message("[설정] 매크로 설정 좌표/딜레이 정보를 서버에 업로드 완료했어요.")
+            QtWidgets.QMessageBox.information(self, "성공", "매크로 설정을 로컬(edms_config.json)과 서버에 저장 완료!")
+            self.log_message("[설정] 매크로 좌표/딜레이를 edms_config.json 및 서버에 저장 완료했어요.")
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "오류", f"설정 저장 실패: {e}")
+            # 서버 저장 실패해도 로컬 저장은 이미 됐으므로 매크로엔 반영됨
+            QtWidgets.QMessageBox.warning(self, "부분 저장", f"로컬(edms_config.json)에는 저장됐으나 서버 저장은 실패했어요:\n{e}")
+            self.log_message(f"[설정] 로컬 저장 완료, 서버 저장 실패: {e}")
+
+    def _write_edms_config_json(self, offsets: dict, delays: dict):
+        """매크로가 읽는 edms_config.json 에 좌표/딜레이를 병합 저장한다.
+        오프셋 0(미설정 스핀박스)은 기존 값을 보존하기 위해 덮어쓰지 않는다."""
+        import json
+        try:
+            edms_path = APP_DIR / "edms_config.json"
+            data = {}
+            if edms_path.exists():
+                with open(edms_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            cur_off = data.get("offsets", {}) or {}
+            for k, v in offsets.items():
+                if v not in (0, None):   # 0 = 미설정으로 간주, 기존값 유지
+                    cur_off[k] = v
+            data["offsets"] = cur_off
+            data["delays"] = dict(delays)
+            data.setdefault("ratios", {"pop_send_x": 0.693989, "pop_send_y": 0.873817})
+            with open(edms_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            self.log_message(f"[설정] edms_config.json 갱신 완료: {edms_path}")
+        except Exception as e:
+            self.log_message(f"[설정] edms_config.json 저장 실패: {e}")
+
+    def _load_edms_config_into_spins(self):
+        """매크로가 읽는 edms_config.json 의 offsets/delays 를 설정 탭 스핀박스에 반영한다."""
+        import json
+        try:
+            if not hasattr(self, "offset_inputs"):
+                return
+            edms_path = APP_DIR / "edms_config.json"
+            if not edms_path.exists():
+                return
+            with open(edms_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for k, v in (data.get("offsets") or {}).items():
+                if k in self.offset_inputs and v not in (None, ""):
+                    self.offset_inputs[k].setValue(int(v))
+            for k, v in (data.get("delays") or {}).items():
+                if k in self.delay_inputs and v not in (None, ""):
+                    self.delay_inputs[k].setValue(float(v))
+        except Exception:
+            pass
 
     # --- Mouse coordinate tracker ---
     def toggle_mouse_tracking(self):
@@ -1622,10 +1709,13 @@ class KkandoriAgent(QtWidgets.QMainWindow):
                     self.mouse_tracker.stop()
 
     def load_initial_values(self):
+        # [좌표 반영 버그 수정] 매크로가 읽는 edms_config.json 의 좌표/딜레이를 설정 탭 스핀박스에 로드해
+        # UI 가 매크로의 실제 적용값을 그대로 보여주도록 한다(설정 탭 = 매크로 단일 출처).
+        self._load_edms_config_into_spins()
         try:
             from solting_auto.config import load_config
             cfg = load_config(str(APP_DIR / "config.yaml"))
-            
+
             pdf_folder = cfg.get("insurance", {}).get("pdf_folder", "./output/consent_pdfs")
             pdf_stamped_folder = cfg.get("insurance", {}).get("pdf_stamped_folder", "./output/consent_pdfs_stamped")
             stamping_enabled = cfg.get("insurance", {}).get("stamping_enabled", True)
@@ -1657,7 +1747,19 @@ class KkandoriAgent(QtWidgets.QMainWindow):
             self.check_stamping.setChecked(stamping_enabled)
             kb_scan_enabled = cfg.get("insurance", {}).get("kb_scan_enabled", False)
             self.check_kb_scan.setChecked(kb_scan_enabled)
-            
+
+            # PNG 저장 비율 옵션 로드
+            _oz = cfg.get("insurance", {}).get("oz", {})
+            self.check_save_ratio.setChecked(bool(_oz.get("save_ratio_enabled", False)))
+            self.spin_save_ratio.setValue(int(_oz.get("save_ratio", 160)))
+            self.spin_save_ratio.setEnabled(self.check_save_ratio.isChecked())
+
+            # 50명 단위 자동 폴더링 옵션 로드
+            _ins = cfg.get("insurance", {})
+            self.check_auto_folder.setChecked(bool(_ins.get("auto_folder_enabled", False)))
+            self.spin_folder_interval.setValue(int(_ins.get("auto_folder_interval", 50)))
+            self.spin_folder_interval.setEnabled(self.check_auto_folder.isChecked())
+
             # 입력 방식 로드
             input_mode = cfg.get("insurance", {}).get("input_mode", "single")
             if input_mode == "batch":
@@ -1921,6 +2023,12 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         if "oz" not in config["insurance"]:
             config["insurance"]["oz"] = {}
         config["insurance"]["oz"]["file_format"] = self.combo_file_format.currentText()
+        # PNG 저장 비율 옵션 (확대/축소 비율 %) — KB EDMS 스캔 인식률 향상용
+        config["insurance"]["oz"]["save_ratio_enabled"] = self.check_save_ratio.isChecked()
+        config["insurance"]["oz"]["save_ratio"] = self.spin_save_ratio.value()
+        # 50명 단위 자동 폴더링 옵션 — KB 스캔 렉 완화용
+        config["insurance"]["auto_folder_enabled"] = self.check_auto_folder.isChecked()
+        config["insurance"]["auto_folder_interval"] = self.spin_folder_interval.value()
         config["insurance"]["input_mode"] = "batch" if self.radio_input_batch.isChecked() else "single"
 
         config["columns"] = {

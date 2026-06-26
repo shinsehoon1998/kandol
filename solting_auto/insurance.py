@@ -1939,6 +1939,22 @@ class InsuranceAutomation:
         if "ratios" in edms_cfg:
             ratios.update(edms_cfg["ratios"])
 
+        # [좌표 반영 버그 수정] 설정 탭 스핀박스 값은 config["insurance"](=self.ins)로 주입된다.
+        # edms_config.json(정적 파일)만 읽으면 사용자가 설정 탭에서 바꾼 좌표/딜레이가 반영되지 않으므로,
+        # 라이브 config 값을 최우선으로 병합한다. (오프셋 0/None = '미설정'으로 간주해 무시 → 기존값 보존)
+        live = self.ins if isinstance(self.ins, dict) else {}
+        for k, v in (live.get("offsets") or {}).items():
+            if v not in (0, None, ""):
+                offsets[k] = v
+        for k, v in (live.get("delays") or {}).items():
+            if v not in (0, None, ""):
+                delays[k] = v
+        for k, v in (live.get("ratios") or {}).items():
+            if v not in (0, None, ""):
+                ratios[k] = v
+        self.log.info(f"[EDMS 좌표] 적용된 핵심 오프셋: image_add=({offsets.get('image_add_x')},{offsets.get('image_add_y')}) "
+                      f"send=({offsets.get('send_x')},{offsets.get('send_y')})")
+
         # 0) 파일 복사 (기본 문서 폴더 및 EDMS2 하위 폴더 둘 다 복사하여 접근 가능성 극대화)
         import os
         import shutil

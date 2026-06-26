@@ -129,6 +129,9 @@ insurance:
     dialog_timeout_sec: 15    # 인쇄/저장 대화상자 대기
     # 좌표 기반 폴백이 필요할 때 사용(픽셀). 비워두면 컨트롤 식별 우선.
     print_button_pos: []      # 예: [60, 110]
+    # PNG 저장 시 '확대/축소 비율' 자동 설정 (KB EDMS 스캔 인식률 향상용)
+    save_ratio_enabled: false   # true 면 PNG 저장 옵션의 확대/축소 비율을 자동 설정
+    save_ratio: 160             # 적용 비율(%) — 160 이상 권장(인식률 100% 근접)
 
   # 동의서 PDF 저장 폴더
   pdf_folder: "./output/consent_pdfs"
@@ -136,6 +139,11 @@ insurance:
   pdf_stamped_folder: "./output/consent_pdfs_stamped"
   # 서명 및 스탬핑 자동 처리 여부
   stamping_enabled: true
+
+  # 50명 단위 자동 폴더링 (KB 스캔 렉 완화용)
+  # true 면 성공 고객 N명마다 원본/스탬프 폴더 안에 'YYYYMMDD_조번호' 하위폴더를 만들어 분산 저장
+  auto_folder_enabled: false
+  auto_folder_interval: 50
 
   # 진단 모드(network 캡처 시 요청 덤프)
   network_debug: true
