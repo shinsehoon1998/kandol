@@ -58,7 +58,9 @@ export default function CustomersPage() {
     const q = search.trim();
     if (!q) return customers;
     return customers.filter((c) =>
-      (c.customer_name || '').includes(q) || (c.birth || '').includes(q)
+      (c.customer_name || '').includes(q) ||
+      (c.birth || '').includes(q) ||
+      (c.phone || '').includes(q)
     );
   }, [customers, search]);
 
@@ -87,7 +89,7 @@ export default function CustomersPage() {
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="고객명 / 생년월일 검색"
+            placeholder="고객명 / 생년월일 / 전화번호 검색"
             className="px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500 w-56"
           />
         </div>
@@ -105,6 +107,7 @@ export default function CustomersPage() {
                 <tr className="border-b border-slate-800 text-xs font-bold text-slate-400 uppercase tracking-wider">
                   <th className="py-3 px-4">고객명</th>
                   <th className="py-3 px-4">생년월일</th>
+                  <th className="py-3 px-4">전화번호</th>
                   <th className="py-3 px-4">나이</th>
                   <th className="py-3 px-4">성별</th>
                   <th className="py-3 px-4">월보험료</th>
@@ -120,6 +123,7 @@ export default function CustomersPage() {
                   <tr key={c.id} className="hover:bg-slate-800/30">
                     <td className="py-4 px-4 font-bold text-slate-200">{c.customer_name}</td>
                     <td className="py-4 px-4 text-slate-300">{c.birth || '-'}</td>
+                    <td className="py-4 px-4 font-mono text-slate-300">{c.phone || '-'}</td>
                     <td className="py-4 px-4 text-slate-300">{c.age ?? '-'}</td>
                     <td className="py-4 px-4 text-slate-300">{c.gender || '-'}</td>
                     <td className="py-4 px-4 font-mono text-slate-200">{fmtWon(c.monthly_premium)}</td>
@@ -246,6 +250,7 @@ function CustomerDetailModal({
             <span className="text-lg font-black text-white">{c.customer_name}</span>
             <span className="ml-3 text-sm text-slate-400">
               {c.birth} · {c.gender || '-'} · {c.age ?? '-'}세
+              {c.phone ? ` · 📞 ${c.phone}` : ''}
             </span>
           </div>
           <button onClick={onClose} className="text-slate-400 hover:text-white text-xl font-bold">

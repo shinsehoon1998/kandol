@@ -455,6 +455,7 @@ CREATE TABLE IF NOT EXISTS public.customer_records (
     device_id UUID REFERENCES public.devices(id) ON DELETE SET NULL,
     customer_name TEXT NOT NULL,            -- 고객명
     birth TEXT NOT NULL DEFAULT '',         -- 생년월일
+    phone TEXT,                             -- 전화번호(동의서 엑셀 매칭)
     age INTEGER,                            -- 나이
     gender TEXT,                            -- 성별
     analysis_date TEXT,                     -- 분석일자
@@ -510,7 +511,7 @@ BEGIN
     END IF;
 
     INSERT INTO public.customer_records (
-      tenant_id, device_id, customer_name, birth, age, gender,
+      tenant_id, device_id, customer_name, birth, phone, age, gender,
       analysis_date, policy_count, monthly_premium, consent_end_date,
       contract_status, coverage_summary, coverage_detail, raw, crawled_at, updated_at
     )
@@ -519,6 +520,7 @@ BEGIN
       p_device_id,
       v_rec->>'customer_name',
       COALESCE(v_rec->>'birth', ''),
+      NULLIF(v_rec->>'phone', ''),
       NULLIF(regexp_replace(COALESCE(v_rec->>'age',''), '[^0-9]', '', 'g'), '')::INTEGER,
       v_rec->>'gender',
       v_rec->>'analysis_date',
@@ -534,6 +536,7 @@ BEGIN
     )
     ON CONFLICT (tenant_id, customer_name, birth) DO UPDATE
     SET device_id = EXCLUDED.device_id,
+        phone = COALESCE(EXCLUDED.phone, public.customer_records.phone),
         age = COALESCE(EXCLUDED.age, public.customer_records.age),
         gender = COALESCE(EXCLUDED.gender, public.customer_records.gender),
         analysis_date = COALESCE(EXCLUDED.analysis_date, public.customer_records.analysis_date),

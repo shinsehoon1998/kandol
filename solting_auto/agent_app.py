@@ -505,13 +505,15 @@ class CustomerCrawlWorker(QtCore.QThread):
     rows_signal = QtCore.pyqtSignal(list)            # 미리보기용 정규화 행
     finished_signal = QtCore.pyqtSignal(bool, str, int)  # success, msg, saved_count
 
-    def __init__(self, cdp_url, tenant_id, device_id, supabase_client, dump_path):
+    def __init__(self, cdp_url, tenant_id, device_id, supabase_client, dump_path,
+                 contact_excel_paths=None):
         super().__init__()
         self.cdp_url = cdp_url
         self.tenant_id = tenant_id
         self.device_id = device_id
         self.supabase = supabase_client
         self.dump_path = dump_path
+        self.contact_excel_paths = contact_excel_paths or []
         self.stop_requested = False
 
     def run(self):
@@ -529,6 +531,7 @@ class CustomerCrawlWorker(QtCore.QThread):
                 progress_cb=lambda d, t, m: self.progress_signal.emit(d, t, m),
                 stop_cb=lambda: self.stop_requested,
                 dump_path=self.dump_path,
+                contact_excel_paths=self.contact_excel_paths,
             )
 
             self.rows_signal.emit(records or [])
@@ -1822,11 +1825,28 @@ class KkandoriAgent(QtWidgets.QMainWindow):
 
         guide = QtWidgets.QLabel(
             "사용법: ① KB전산 보장분석 화면을 열고 '조회'로 고객 목록을 띄웁니다 →\n"
-            "② 아래 '고객DB 수집 시작'을 누르면 화면 데이터를 자동 수집·저장합니다."
+            "② (선택) 아래에서 동의서 진행 엑셀을 골라 전화번호를 매칭 →\n"
+            "③ '고객DB 수집 시작'을 누르면 화면 데이터를 자동 수집·저장합니다."
         )
         guide.setStyleSheet("color: #64748b; font-size: 9pt;")
         guide.setWordWrap(True)
         layout.addWidget(guide)
+
+        # 전화번호 매칭용 엑셀 선택 (선택 사항)
+        self.crawl_contact_paths = []
+        contact_row = QtWidgets.QHBoxLayout()
+        self.btn_pick_contacts = QtWidgets.QPushButton("📎 전화번호 매칭 엑셀 선택(선택)")
+        self.btn_pick_contacts.setStyleSheet("background-color: #334155; color: #e2e8f0; border-radius: 6px; padding: 6px;")
+        self.btn_pick_contacts.clicked.connect(self.pick_contact_excels)
+        self.lbl_contacts = QtWidgets.QLabel("선택된 엑셀 없음 (전화번호 매칭 안 함)")
+        self.lbl_contacts.setStyleSheet("color: #94a3b8; font-size: 9pt;")
+        self.btn_clear_contacts = QtWidgets.QPushButton("초기화")
+        self.btn_clear_contacts.setStyleSheet("background-color: #1e293b; color: #94a3b8; border-radius: 6px; padding: 6px;")
+        self.btn_clear_contacts.clicked.connect(self.clear_contact_excels)
+        contact_row.addWidget(self.btn_pick_contacts, 2)
+        contact_row.addWidget(self.lbl_contacts, 3)
+        contact_row.addWidget(self.btn_clear_contacts, 1)
+        layout.addLayout(contact_row)
 
         # 버튼 줄
         btn_row = QtWidgets.QHBoxLayout()
@@ -1851,7 +1871,7 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         layout.addWidget(self.crawl_progress)
 
         # 결과 미리보기 표 (한국어 헤더)
-        self.crawl_headers = ["고객명", "생년월일", "나이", "성별", "월보험료", "가입건수", "동의종료일", "분석일자"]
+        self.crawl_headers = ["고객명", "생년월일", "전화번호", "나이", "성별", "월보험료", "가입건수", "동의종료일", "분석일자"]
         self.crawl_table = QtWidgets.QTableWidget(0, len(self.crawl_headers))
         self.crawl_table.setHorizontalHeaderLabels(self.crawl_headers)
         self.crawl_table.horizontalHeader().setStretchLastSection(True)
@@ -1893,12 +1913,26 @@ class KkandoriAgent(QtWidgets.QMainWindow):
             self.device["id"],
             self.supabase,
             dump_path,
+            list(self.crawl_contact_paths),
         )
         self.customer_crawl_worker.log_signal.connect(self._crawl_log)
         self.customer_crawl_worker.progress_signal.connect(self._crawl_progress)
         self.customer_crawl_worker.rows_signal.connect(self._crawl_fill_table)
         self.customer_crawl_worker.finished_signal.connect(self._crawl_finished)
         self.customer_crawl_worker.start()
+
+    def pick_contact_excels(self):
+        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self, "전화번호 매칭용 동의서 엑셀 선택", "", "Excel 파일 (*.xlsx *.xls)")
+        if paths:
+            self.crawl_contact_paths = list(paths)
+            self.lbl_contacts.setText(f"엑셀 {len(paths)}개 선택됨 → 전화번호 매칭 적용")
+            self.lbl_contacts.setStyleSheet("color: #34d399; font-size: 9pt;")
+
+    def clear_contact_excels(self):
+        self.crawl_contact_paths = []
+        self.lbl_contacts.setText("선택된 엑셀 없음 (전화번호 매칭 안 함)")
+        self.lbl_contacts.setStyleSheet("color: #94a3b8; font-size: 9pt;")
 
     def stop_customer_crawl(self):
         if self.customer_crawl_worker and self.customer_crawl_worker.isRunning():
@@ -1917,7 +1951,7 @@ class KkandoriAgent(QtWidgets.QMainWindow):
             self._crawl_log(f"[진행] {done}/{total} - {msg}")
 
     def _crawl_fill_table(self, rows):
-        keys = ["customer_name", "birth", "age", "gender", "monthly_premium",
+        keys = ["customer_name", "birth", "phone", "age", "gender", "monthly_premium",
                 "policy_count", "consent_end_date", "analysis_date"]
         self.crawl_table.setRowCount(len(rows))
         for r, rec in enumerate(rows):
@@ -2209,6 +2243,10 @@ class KkandoriAgent(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "경고", "최소 하나 이상의 가동 단계를 선택해야 합니다.")
             return
 
+        # 방법3: 동의서(보험사) 단계가 진행되면, 완료 후 이 엑셀의 전화번호를 고객DB에 자동 적재
+        self._last_consent_xlsx = xlsx_path
+        self._last_consent_ran = self.check_insurance.isChecked()
+
         # 기존 config.yaml에서 전체 설정을 먼저 안전하게 로드합니다.
         try:
             from solting_auto.config import load_config
@@ -2357,12 +2395,42 @@ class KkandoriAgent(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "완료", msg)
             if report_url:
                 self.log_message(f"[완료] 결과 엑셀 리포트 URL: {report_url}")
+            # 방법3: 동의서 단계 진행분의 전화번호를 고객DB에 자동 적재(매칭)
+            if getattr(self, "_last_consent_ran", False):
+                self._sync_phones_after_consent(getattr(self, "_last_consent_xlsx", None))
         else:
             QtWidgets.QMessageBox.critical(self, "작업 중단/오류", msg)
 
         import solting_auto.insurance
         solting_auto.insurance.active_instance = None
         self.current_job_worker = None
+
+    def _sync_phones_after_consent(self, xlsx_path):
+        """동의서 진행 엑셀에서 (이름/생년월일/전화)를 추출해 고객DB에 전화번호를 자동 적재.
+        보장분석 수집 데이터와 (이름+생년월일)로 자동 병합된다(upsert COALESCE)."""
+        try:
+            if not (self.supabase and self.tenant and self.device):
+                return
+            if not xlsx_path or not os.path.exists(xlsx_path):
+                return
+            from solting_auto import kb_crawler
+            contacts = kb_crawler._read_excel_contacts([xlsx_path])
+            recs = [{"customer_name": c["customer_name"], "birth": c.get("birth", ""), "phone": c["phone"]}
+                    for c in contacts if c.get("customer_name") and c.get("phone")]
+            if not recs:
+                return
+            n = 0
+            for i in range(0, len(recs), 100):
+                chunk = recs[i:i + 100]
+                res = self.supabase.rpc("upsert_customer_records_via_device", {
+                    "p_tenant_id": self.tenant["id"],
+                    "p_device_id": self.device["id"],
+                    "p_records": chunk,
+                }).execute()
+                n += res.data if isinstance(res.data, int) else len(chunk)
+            self.log_message(f"[고객DB] 동의서 엑셀 전화번호 {n}건을 고객DB에 자동 적재했습니다.")
+        except Exception as e:
+            self.log_message(f"[고객DB] 전화번호 자동 적재 생략(고객DB 미생성 등): {e}")
 
     # --- EDMS Automation (Tab 3) ---
     def start_edms_upload(self):

@@ -72,14 +72,24 @@ def attach(pg):
 def main():
     with sync_playwright() as p:
         br = p.chromium.connect_over_cdp("http://localhost:9222")
+        pump = None
         for ctx in br.contexts:
             for pg in ctx.pages:
                 attach(pg)
+                pump = pump or pg
             ctx.on("page", lambda pg: attach(pg))
         log.info(f"=== 보장분석 네트워크 감시 시작 ({DURATION}s). "
                  f"지금 KB에서 보장분석→조회→고객 더블클릭→가입현황 을 눌러주세요. ===")
+        # ⚠️ time.sleep 은 Playwright 이벤트를 펌프하지 않아 on("response")가 발화하지 않는다.
+        # page.wait_for_timeout 으로 펌프해야 응답이 실제로 캡처된다.
         for _ in range(DURATION):
-            time.sleep(1)
+            try:
+                if pump:
+                    pump.wait_for_timeout(1000)
+                else:
+                    time.sleep(1)
+            except Exception:
+                time.sleep(1)
         log.info("=== 감시 종료 ===")
 
 
