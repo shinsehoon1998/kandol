@@ -432,15 +432,24 @@ _DOM_SCROLL_GRID_JS = r"""async () => {
   };
   harvest();
   if(cont){
-    // 바닥에서 즉시 멈추지 않음 — KB가 바닥 도달 시 추가 로드(lazy)할 수 있으므로
-    // '연속 N회 새 행 없음(stable)'으로 종료 판단(매우 긴 목록도 끝까지 로드).
-    let last=-1, stable=0;
-    for(let i=0;i<400 && stable<4;i++){
-      cont.scrollTop = Math.min(cont.scrollTop + Math.max(cont.clientHeight*0.8,80), cont.scrollHeight);
-      cont.dispatchEvent(new Event('scroll',{bubbles:true}));  // WebSquare 가상 렌더 트리거
-      await sleep(160);
+    // KB 그리드는 서버에서 조금씩 추가 로딩(lazy)한다. 작은 보폭으로 내려가되, 바닥에 닿으면
+    // 추가 로딩을 충분히(길게) 기다린다. 행 수 '또는' 스크롤 높이가 늘면 계속 진행하고,
+    // 둘 다 연속 10회 안 늘 때(또는 시간예산 초과) 종료 → 매우 긴 목록도 끝까지 로드.
+    const t0 = Date.now();
+    let lastSize=-1, lastSH=-1, idle=0;
+    for(let i=0;i<5000 && idle<10 && (Date.now()-t0)<90000;i++){
+      const atBottom = cont.scrollTop + cont.clientHeight >= cont.scrollHeight - 2;
+      if(atBottom){
+        await sleep(650);                 // 바닥: 서버 추가 로딩 대기
+      } else {
+        cont.scrollTop = Math.min(cont.scrollTop + Math.max(cont.clientHeight*0.6, 60), cont.scrollHeight);
+        cont.dispatchEvent(new Event('scroll',{bubbles:true}));
+        await sleep(170);
+      }
       harvest();
-      if(seen.size===last) stable++; else { stable=0; last=seen.size; }
+      const grew = (seen.size !== lastSize) || (cont.scrollHeight !== lastSH);
+      if(grew){ idle=0; lastSize=seen.size; lastSH=cont.scrollHeight; }
+      else { idle++; }
     }
     try{ cont.scrollTop=0; cont.dispatchEvent(new Event('scroll',{bubbles:true})); }catch(e){}
   }
@@ -448,9 +457,8 @@ _DOM_SCROLL_GRID_JS = r"""async () => {
 }"""
 
 
-def _scrape_dom_grid(page, logger=None):
-    """페이지+프레임의 그리드 중 헤더가 보장분석 목록과 가장 잘 맞는 표를 골라,
-    가상 스크롤이면 끝까지 스크롤·누적해 전체 행을 정렬된 dict 배열로 반환. 반환 (rows, score)."""
+def _scrape_dom_grid_once(page):
+    """프레임들에서 한 번의 스크롤-수확 패스. (header, rows, scrolled) 또는 None."""
     frames = []
     try:
         frames = list(page.frames)
@@ -476,11 +484,34 @@ def _scrape_dom_grid(page, logger=None):
             best = (header, rows)
             best_scrolled = bool(res.get("scrolled"))
     if not best:
+        return None
+    return best[0], best[1], best_scrolled
+
+
+def _scrape_dom_grid(page, logger=None, stop_cb=None):
+    """그리드를 스크롤·수확하되, KB가 패스마다 추가 로딩하므로 행 수가 더 안 늘 때까지
+    여러 패스 반복(최대 6회)해 전체 목록을 확보한다. 반환 (rows, score)."""
+    best_header, best_rows = None, []
+    prev = -1
+    for attempt in range(12):
+        if stop_cb and stop_cb():
+            break
+        got = _scrape_dom_grid_once(page)
+        if not got:
+            break
+        header, rows, scrolled = got
+        if len(rows) >= len(best_rows):
+            best_header, best_rows = header, rows
+        if logger:
+            logger.info(f"[수집] DOM 패스{attempt + 1}: {len(rows)}행 (누적 최대 {len(best_rows)}행)")
+        if len(rows) <= prev:   # 더 안 늘면 종료(전체 로드 완료)
+            break
+        prev = len(rows)
+    if not best_rows:
         return None, 0
-    header, rows = best
-    mapped = _map_grid_table(header, rows)
+    mapped = _map_grid_table(best_header, best_rows)
     if logger:
-        logger.info(f"[수집] DOM 그리드 선택(스크롤수집={best_scrolled}): {len(rows)}행, 헤더={header[:14]}")
+        logger.info(f"[수집] DOM 그리드 최종 {len(best_rows)}행, 헤더={best_header[:14]}")
     return mapped, _score_customer_array(mapped)
 
 
@@ -571,7 +602,7 @@ def crawl_customers(cdp_url="http://localhost:9222", logger=None,
             #    (자동 클릭은 화면 상태를 바꿔 떠 있던 목록을 날릴 수 있어 위험).
             prog(0, 0, "화면의 보장분석 목록 확인 중...")
             try:
-                dom_arr, dom_score = _scrape_dom_grid(page, logger)
+                dom_arr, dom_score = _scrape_dom_grid(page, logger, stop_cb=stopped)
                 if dom_arr and dom_score >= 3:
                     best_arr, best_score = dom_arr, dom_score
                     log(f"[수집] 화면 목록 {len(best_arr)}건 즉시 수집(점수 {dom_score:.1f}).")
