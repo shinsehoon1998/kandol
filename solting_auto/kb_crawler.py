@@ -457,6 +457,66 @@ _DOM_SCROLL_GRID_JS = r"""async () => {
 }"""
 
 
+# WebSquare 그리드 데이터모델 직접 추출 — 가장 확실/완전한 방법.
+# 그리드는 전체 행(getRowCount)을 데이터모델에 보유하고 화면엔 일부만 가상 렌더한다.
+# $p.getComponentById(id).getCellData(r,c) 로 전체를 즉시 읽는다(스크롤 불필요).
+_WEBSQUARE_GRID_JS = r"""() => {
+  let gel=null, header=[];
+  for(const t of document.querySelectorAll('table')){
+    const ths=[...t.querySelectorAll('th')].map(c=>(c.innerText||'').trim());
+    const j=ths.join('|');
+    if(j.includes('월보험료') && j.includes('생년월일')){ gel=t.closest('.w2grid'); header=ths; break; }
+  }
+  if(!gel) return null;
+  if(!window.$p || typeof window.$p.getComponentById!=='function') return null;
+  let g=null;
+  try{ g=window.$p.getComponentById(gel.id); }catch(e){ return null; }
+  if(!g || typeof g.getRowCount!=='function' || typeof g.getCellData!=='function') return null;
+  let n=0; try{ n=g.getRowCount(); }catch(e){ return null; }
+  if(!n || n<1) return null;
+  let cols=header.length;
+  try{ if(typeof g.getColumnCount==='function'){ const c=g.getColumnCount(); if(c) cols=c; } }catch(e){}
+  const rows=[];
+  for(let r=0;r<n;r++){
+    const row=[];
+    for(let c=0;c<cols;c++){ let v=''; try{ v=g.getCellData(r,c); }catch(e){} row.push(v==null?'':String(v)); }
+    rows.push(row);
+  }
+  return {header, rows, total:n};
+}"""
+
+
+def _extract_via_websquare(page, logger=None):
+    """WebSquare 그리드 데이터모델에서 전체 행을 직접 추출. 반환 (mapped_rows, score) 또는 None."""
+    frames = []
+    try:
+        frames = list(page.frames)
+    except Exception:
+        frames = [page]
+    best = None
+    best_total = 0
+    for fr in frames:
+        try:
+            res = fr.evaluate(_WEBSQUARE_GRID_JS)
+        except Exception:
+            res = None
+        if not res:
+            continue
+        rows = res.get("rows") or []
+        header = res.get("header") or []
+        total = res.get("total", 0) or 0
+        if rows and total > best_total:
+            best_total = total
+            best = (header, rows)
+    if not best:
+        return None
+    header, rows = best
+    mapped = _map_grid_table(header, rows)
+    if logger:
+        logger.info(f"[수집] WebSquare 데이터모델 직접추출: 전체 {len(rows)}행(getRowCount={best_total})")
+    return mapped, _score_customer_array(mapped)
+
+
 def _scrape_dom_grid_once(page):
     """프레임들에서 한 번의 스크롤-수확 패스. (header, rows, scrolled) 또는 None."""
     frames = []
@@ -489,8 +549,18 @@ def _scrape_dom_grid_once(page):
 
 
 def _scrape_dom_grid(page, logger=None, stop_cb=None):
-    """그리드를 스크롤·수확하되, KB가 패스마다 추가 로딩하므로 행 수가 더 안 늘 때까지
-    여러 패스 반복(최대 6회)해 전체 목록을 확보한다. 반환 (rows, score)."""
+    """① WebSquare 데이터모델 직접추출(전체·즉시)을 우선 시도하고, 실패 시
+    ② 가상스크롤 누적(멀티패스)으로 폴백한다. 반환 (rows, score)."""
+    # ① 데이터모델 직접추출 — 전체 행을 한 번에(가장 확실)
+    try:
+        via = _extract_via_websquare(page, logger)
+        if via and via[0] and via[1] >= 3:
+            return via
+    except Exception as e:
+        if logger:
+            logger.info(f"[수집] WebSquare 직접추출 불가, 스크롤로 전환: {e}")
+
+    # ② 폴백: 스크롤 누적(멀티패스)
     best_header, best_rows = None, []
     prev = -1
     for attempt in range(12):
