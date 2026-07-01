@@ -65,7 +65,20 @@ class InsuranceAutomation:
         if mode == "attach":
             cdp_url = browser.get("cdp_url", "http://localhost:9222")
             self.log.info(f"기존 브라우저에 접속(CDP): {cdp_url}")
-            self._browser = self._pw.chromium.connect_over_cdp(cdp_url)
+            # 일시적 소켓 오류(WinError 10035 등)·브라우저 미준비 대비 재시도
+            self._browser = None
+            last_err = None
+            for attempt in range(4):
+                try:
+                    self._browser = self._pw.chromium.connect_over_cdp(cdp_url)
+                    break
+                except Exception as ce:
+                    last_err = ce
+                    self.log.warning(f"CDP 접속 시도 {attempt+1}/4 실패: {ce} — 1.5초 후 재시도")
+                    time.sleep(1.5)
+            if self._browser is None:
+                raise RuntimeError(
+                    f"브라우저(CDP) 접속 실패: {last_err}. 디버그 브라우저(start_edge_debug)가 켜져 있는지 확인하세요.")
             self.context = (self._browser.contexts[0]
                             if self._browser.contexts else self._browser.new_context())
             
@@ -224,7 +237,7 @@ class InsuranceAutomation:
             if is_dup:
                 reason = getattr(self, "last_skip_reason", "최근 등록 이력 존재(2개월 이내)")
                 self.log.info(f"[{name}] 중복 경고 감지: {reason}. 등록을 건너뜁니다.")
-                raise DuplicateCustomerError(reason)
+                raise DuplicateCustomerError(f"기등록(KB): {reason}")
 
             # 옵션(가입설계 체크 / 입력 / 단독입력) - 이미 기본값이면 실패해도 무시
             self._try_check(dialog, self.sel["consent"].get("agree_check"))
@@ -298,7 +311,8 @@ class InsuranceAutomation:
                     time.sleep(0.2)
                     
                 if is_dup:
-                    reason = getattr(self, "last_skip_reason", "최근 등록 이력 존재(2개월 이내)")
+                    _kbreason = getattr(self, "last_skip_reason", "최근 등록 이력 존재(2개월 이내)")
+                    reason = f"기등록(KB): {_kbreason}"
                     self.log.info(f"[{rec['name']}] 중복 경고 모달 감지됨. 이 레코드는 건너뜁니다. 사유: {reason}")
                     # 입력했던 슬롯 비우기
                     self._clear_input(dialog, name_sel)
@@ -1156,7 +1170,7 @@ class InsuranceAutomation:
             if state == "blocked":
                 self.last_skip_reason = "이미 서면 동의를 받은 고객(2개월 이내)"
                 self.log.info(f"[{name}] 출력 시점 서면동의 완료 차단 알림 감지 → 등록을 건너뜁니다.")
-                raise DuplicateCustomerError("이미 서면 동의를 받은 고객(2개월 이내)")
+                raise DuplicateCustomerError("기등록(KB): 이미 서면 동의를 받은 고객(2개월 이내)")
             if state == "timeout":
                 raise RetryableError("출력 후 OZ 뷰어와 차단 알림이 모두 감지되지 않았습니다(타임아웃).")
             try:

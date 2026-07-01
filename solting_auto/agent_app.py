@@ -198,15 +198,18 @@ class AutomationWorker(QtCore.QThread):
                 pass
 
         try:
-            # Update status in DB to running via RPC
-            self.supabase.rpc("update_execution_log_status_via_device", {
-                "p_log_id": self.log_id,
-                "p_status": "running",
-                "p_error_reason": None,
-                "p_error_screenshot_url": None,
-                "p_report_file_url": None
-            }).execute()
-            
+            # Update status in DB to running via RPC (일시적 소켓오류는 무시 — 자동화는 계속)
+            try:
+                self.supabase.rpc("update_execution_log_status_via_device", {
+                    "p_log_id": self.log_id,
+                    "p_status": "running",
+                    "p_error_reason": None,
+                    "p_error_screenshot_url": None,
+                    "p_report_file_url": None
+                }).execute()
+            except Exception as _st_err:
+                logger.warning(f"실행상태(running) 업데이트 일시 실패(무시하고 진행): {_st_err}")
+
             # Run Solting core automation suite
             summary = process_file(
                 self.xlsx_path, 
@@ -1020,6 +1023,17 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         folder_layout.addWidget(self.spin_folder_interval)
         folder_layout.addStretch()
         step3_layout.addLayout(folder_layout)
+
+        # 기등록(로컬) 무시하고 재처리 옵션 — 이 PC가 과거 등록한 고객도 다시 시도
+        dedup_layout = QtWidgets.QHBoxLayout()
+        self.check_ignore_dedup = QtWidgets.QCheckBox("♻️ 기등록(로컬) 무시하고 재처리")
+        self.check_ignore_dedup.setChecked(False)
+        self.check_ignore_dedup.setToolTip(
+            "이 PC가 과거에 등록 성공한 고객(로컬 저장분)도 건너뛰지 않고 다시 시도합니다.\n"
+            "※ 파일 내 중복과 KB 전산 실시간 중복(팝업)은 그대로 유지됩니다.")
+        dedup_layout.addWidget(self.check_ignore_dedup)
+        dedup_layout.addStretch()
+        step3_layout.addLayout(dedup_layout)
 
         # Triggers
         trigger_layout = QtWidgets.QHBoxLayout()
@@ -2295,6 +2309,8 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         # 50명 단위 자동 폴더링 옵션 — KB 스캔 렉 완화용
         config["insurance"]["auto_folder_enabled"] = self.check_auto_folder.isChecked()
         config["insurance"]["auto_folder_interval"] = self.spin_folder_interval.value()
+        # 기등록(로컬) 무시 재처리 옵션
+        config["insurance"]["ignore_local_dedup"] = self.check_ignore_dedup.isChecked()
         config["insurance"]["input_mode"] = "batch" if self.radio_input_batch.isChecked() else "single"
 
         config["columns"] = {

@@ -16,6 +16,10 @@ SUCCESS = "성공"
 FAIL = "실패"
 SKIP = "Skip"
 
+# 중복 스킵 사유 접두어 — 판단 출처(로컬 저장 / KB 전산 팝업)를 명확히 구분
+REASON_DUP_LOCAL = "기등록(로컬)"   # 이 PC 깐돌이가 과거 성공 등록한 번호(로컬 저장소 기준)
+REASON_DUP_KB = "기등록(KB)"        # KB 전산이 실시간 중복 팝업으로 알려준 경우
+
 
 @dataclass
 class RowResult:
@@ -44,6 +48,9 @@ class ReportSummary:
     success: int = 0
     fail: int = 0
     skip: int = 0
+    dup_local: int = 0          # 기등록 스킵 - 로컬 저장소 기준
+    dup_kb: int = 0             # 기등록 스킵 - KB 팝업 기준
+    etc_skip: int = 0           # 그 외 스킵(검증 실패 등)
     consent_count: int = 0      # 동의서 PDF 발급 수
     kb_scan_count: int = 0     # KB스캔 전송 완료 수
     results: list = field(default_factory=list)
@@ -57,6 +64,13 @@ class ReportSummary:
             self.fail += 1
         elif r.status == SKIP:
             self.skip += 1
+            rs = r.reason or ""
+            if rs.startswith(REASON_DUP_LOCAL):
+                self.dup_local += 1
+            elif rs.startswith(REASON_DUP_KB):
+                self.dup_kb += 1
+            else:
+                self.etc_skip += 1
         if r.consent_pdf:
             self.consent_count += 1
         if r.kb_scan_status == "성공":
@@ -64,8 +78,9 @@ class ReportSummary:
 
     def as_text(self) -> str:
         return (
-            f"총 {self.total}건 | 성공 {self.success} | 실패 {self.fail} | "
-            f"Skip {self.skip} | 동의서 {self.consent_count} | KB스캔 {self.kb_scan_count}"
+            f"총 {self.total}건 | ✅신규등록 {self.success} | "
+            f"⏭️기등록(로컬) {self.dup_local} | ⏭️기등록(KB) {self.dup_kb} | "
+            f"⚠️검증스킵 {self.etc_skip} | ❌실패 {self.fail} | 동의서 {self.consent_count}"
         )
 
 
@@ -95,9 +110,12 @@ def write_report(summary: ReportSummary, output_folder: str, source_name: str, t
 
     ws2 = wb.create_sheet("요약")
     ws2.append(["총건수", summary.total])
-    ws2.append(["성공", summary.success])
+    ws2.append(["신규등록(성공)", summary.success])
+    ws2.append(["기등록 스킵(로컬)", summary.dup_local])
+    ws2.append(["기등록 스킵(KB)", summary.dup_kb])
+    ws2.append(["검증/기타 스킵", summary.etc_skip])
     ws2.append(["실패", summary.fail])
-    ws2.append(["Skip", summary.skip])
+    ws2.append(["Skip 합계", summary.skip])
     ws2.append(["동의서 발급", summary.consent_count])
     ws2.append(["KB스캔 완료", summary.kb_scan_count])
 

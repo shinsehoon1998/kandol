@@ -17,7 +17,11 @@ from pathlib import Path
 
 from . import excel_reader, validators
 from .dedup import PhoneDedup
-from .reporter import ReportSummary, RowResult, SUCCESS, FAIL, SKIP, write_report
+from .reporter import (ReportSummary, RowResult, SUCCESS, FAIL, SKIP, write_report,
+                       REASON_DUP_LOCAL)
+
+# 로컬 기등록 스킵 사유(출처 명시)
+_LOCAL_DUP_REASON = f"{REASON_DUP_LOCAL}: 이 PC에서 과거 성공 등록한 고객"
 
 STAGE_SOLTING = "솔팅"
 STAGE_INSURANCE = "보험사"
@@ -65,10 +69,13 @@ def process_file(xlsx_path: str, config: dict, logger, dry_run: bool = False,
     records = excel_reader.read_records(xlsx_path, columns)
     logger.info(f"총 {len(records)}행 로드")
 
-    # 단계별 독립 중복 저장소
+    # 단계별 독립 중복 저장소 (기등록 로컬필터 무시 옵션 지원)
+    ignore_reg = bool(config.get("insurance", {}).get("ignore_local_dedup", False))
+    if ignore_reg:
+        logger.info("[중복] 기등록(로컬) 무시 옵션 ON — 과거 등록분도 재처리(파일 내 중복·KB 중복은 유지)")
     dedups = {
-        STAGE_SOLTING: PhoneDedup(str(Path(out_folder) / "registered_phones_solting.json")),
-        STAGE_INSURANCE: PhoneDedup(str(Path(out_folder) / "registered_phones_insurance.json")),
+        STAGE_SOLTING: PhoneDedup(str(Path(out_folder) / "registered_phones_solting.json"), ignore_registered=ignore_reg),
+        STAGE_INSURANCE: PhoneDedup(str(Path(out_folder) / "registered_phones_insurance.json"), ignore_registered=ignore_reg),
     }
 
     engines = {}
@@ -116,7 +123,7 @@ def process_file(xlsx_path: str, config: dict, logger, dry_run: bool = False,
                     dedup = dedups[st]
                     if dedup.is_duplicate(rec.phone):
                         is_dup = True
-                        reason = "전화번호 중복"
+                        reason = _LOCAL_DUP_REASON
                         dedup.mark_seen(rec.phone)
                         break
 
@@ -346,17 +353,18 @@ def _process_row(rec, stages, engines, dedups, run, use_checksum, shot_folder, l
         r.status = SUCCESS
     else:
         r.status = SKIP
-        r.reason = "전화번호 중복"
+        # 실제 단계 사유(로컬 기등록 / KB 기등록 / 검증 등)를 보존 — 하드코딩 덮어쓰기 금지
+        r.reason = next((rs for rs in (_get_stage_reason(r, st) for st in stages) if rs), _LOCAL_DUP_REASON)
     return r
 
 
 def _run_stage(stage, rec, engine, dedup, run, shot_folder, logger, dry_run):
     """단일 단계 처리 -> (status, reason, pdf_path)."""
-    # 중복 체크 (FR-4.2) - 단계별 전화번호 기준
+    # 중복 체크 (FR-4.2) - 단계별 전화번호 기준(로컬 기등록/파일 내 중복)
     if dedup.is_duplicate(rec.phone):
         dedup.mark_seen(rec.phone)
-        logger.info(f"[{rec.row_no}행] {stage} Skip - 전화번호 중복")
-        return SKIP, "전화번호 중복", ""
+        logger.info(f"[{rec.row_no}행] {stage} Skip - {_LOCAL_DUP_REASON}")
+        return SKIP, _LOCAL_DUP_REASON, ""
     dedup.mark_seen(rec.phone)
 
     if dry_run:
@@ -406,6 +414,10 @@ def _set_stage(r: RowResult, stage, status, reason="", pdf=""):
 
 def _get_stage_status(r: RowResult, stage):
     return r.solting_status if stage == STAGE_SOLTING else r.insurance_status
+
+
+def _get_stage_reason(r: RowResult, stage):
+    return r.solting_reason if stage == STAGE_SOLTING else r.insurance_reason
 
 
 def _shot(engine, shot_folder, row_no, stage):
