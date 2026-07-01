@@ -108,6 +108,7 @@ export default function CustomersPage() {
                   <th className="py-3 px-4">고객명</th>
                   <th className="py-3 px-4">생년월일</th>
                   <th className="py-3 px-4">전화번호</th>
+                  <th className="py-3 px-4">등록완료</th>
                   <th className="py-3 px-4">나이</th>
                   <th className="py-3 px-4">성별</th>
                   <th className="py-3 px-4">월보험료</th>
@@ -124,6 +125,16 @@ export default function CustomersPage() {
                     <td className="py-4 px-4 font-bold text-slate-200">{c.customer_name}</td>
                     <td className="py-4 px-4 text-slate-300">{c.birth || '-'}</td>
                     <td className="py-4 px-4 font-mono text-slate-300">{c.phone || '-'}</td>
+                    <td className="py-4 px-4">
+                      {c.registered_at ? (
+                        <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-green-500/10 text-green-400 border border-green-500/20"
+                          title={new Date(c.registered_at).toLocaleString()}>
+                          ✅ 등록완료
+                        </span>
+                      ) : (
+                        <span className="text-slate-600 text-xs">미등록</span>
+                      )}
+                    </td>
                     <td className="py-4 px-4 text-slate-300">{c.age ?? '-'}</td>
                     <td className="py-4 px-4 text-slate-300">{c.gender || '-'}</td>
                     <td className="py-4 px-4 font-mono text-slate-200">{fmtWon(c.monthly_premium)}</td>

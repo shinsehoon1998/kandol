@@ -180,6 +180,14 @@ def process_file(xlsx_path: str, config: dict, logger, dry_run: bool = False,
             if auto_folder_enabled:
                 logger.info(f"[폴더링] 성공 {folder_interval}명 단위로 '날짜_조번호' 하위폴더 자동 분산 (날짜={run_date})")
 
+            # 연속 실패 자동중단(서킷브레이커): 세션 만료/브라우저 문제로 이후 전부 실패하는
+            # 상황에서 수천 건을 헛되이 재시도(수 시간 낭비)하지 않도록 조기 중단.
+            consec_fail = 0
+            try:
+                max_consec = int(run.get("max_consecutive_fails", 20))
+            except (TypeError, ValueError):
+                max_consec = 20
+
             for rec in records:
                 if stop_check_cb and stop_check_cb():
                     logger.info("작업 중단 신호가 감지되어 루프 처리를 중지합니다.")
@@ -202,7 +210,18 @@ def process_file(xlsx_path: str, config: dict, logger, dry_run: bool = False,
                 summary.add(res)
                 if progress_cb:
                     progress_cb(summary.total, len(records), res)
-                    
+
+                # 연속 실패 서킷브레이커 — 연속 N건 실패면 세션/브라우저 문제로 보고 자동 중단
+                if res.status == FAIL:
+                    consec_fail += 1
+                    if max_consec > 0 and consec_fail >= max_consec:
+                        logger.error(f"연속 {consec_fail}건 실패 감지 → 세션 만료/브라우저 문제로 추정하여 자동 중단합니다.")
+                        raise RuntimeError(
+                            f"연속 {consec_fail}건 실패로 자동 중단했습니다. KB 로그인 세션·브라우저 상태를 확인하고 재로그인 후 다시 시도해 주세요. "
+                            f"(이미 처리된 건은 기등록으로 건너뜁니다)")
+                else:
+                    consec_fail = 0
+
                 # [수정] 4단계 (KB스캔) 전송 실패 시, 다음 작업을 즉시 일시정지(중단)합니다.
                 if res.kb_scan_status == FAIL:
                     logger.error(f"[{rec.row_no}행] 4단계 (KB스캔) 전송 실패로 인해 전체 작업을 일시정지(중단)합니다.")

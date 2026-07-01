@@ -466,6 +466,7 @@ CREATE TABLE IF NOT EXISTS public.customer_records (
     coverage_summary JSONB,                 -- 보장현황(미가입/부족/충분)
     coverage_detail JSONB,                  -- 가입현황 상세(담보별 금액표, 한국어 키)
     raw JSONB,                              -- 수집 원본(가공 전)
+    registered_at TIMESTAMP WITH TIME ZONE, -- 동의서 등록완료 시각(NULL=미등록). RPC registered 플래그로 기록(20260701 마이그레이션)
     crawled_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,

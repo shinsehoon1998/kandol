@@ -212,13 +212,15 @@ class AutomationWorker(QtCore.QThread):
 
             # Run Solting core automation suite
             summary = process_file(
-                self.xlsx_path, 
-                self.config, 
-                logger, 
-                dry_run=self.dry_run, 
+                self.xlsx_path,
+                self.config,
+                logger,
+                dry_run=self.dry_run,
                 progress_cb=progress_cb,
                 stop_check_cb=lambda: getattr(self, "stop_requested", False)
             )
+            # 고객DB 반영용 결과(행별 상태/전화) 보관
+            self.last_results = list(getattr(summary, "results", []) or [])
 
             # Check if user requested stop
             if hasattr(self, "stop_requested") and self.stop_requested:
@@ -241,14 +243,15 @@ class AutomationWorker(QtCore.QThread):
             report_url = ""
             if report_path:
                 try:
-                    file_name = Path(report_path).name
+                    # 스토리지 키는 ASCII만 허용(한글 파일명은 InvalidKey 오류) → log_id 기반 안전키 사용
+                    storage_key = f"reports/{self.log_id}_result.xlsx"
                     with open(report_path, "rb") as f:
                         self.supabase.storage.from_("error-screenshots").upload(
-                            path=f"reports/{self.log_id}_{file_name}",
+                            path=storage_key,
                             file=f,
                             file_options={"content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}
                         )
-                    report_url = self.supabase.storage.from_("error-screenshots").get_public_url(f"reports/{self.log_id}_{file_name}")
+                    report_url = self.supabase.storage.from_("error-screenshots").get_public_url(storage_key)
                 except Exception as upload_err:
                     logger.error(f"결과 엑셀 리포트 업로드 실패: {upload_err}")
 
@@ -264,6 +267,11 @@ class AutomationWorker(QtCore.QThread):
             self.signaler.finished_signal.emit(True, f"성공적으로 완료되었습니다! {summary.as_text()}", report_url)
 
         except Exception as e:
+            # 중도 중단/실패라도 진행분 결과를 고객DB 반영용으로 보관
+            try:
+                self.last_results = list(getattr(getattr(e, "summary", None), "results", []) or [])
+            except Exception:
+                pass
             # Check if this was a user-initiated stop
             is_stopped = False
             if "사용자 중단 요청" in str(e) or (hasattr(self, "stop_requested") and self.stop_requested):
@@ -2411,28 +2419,47 @@ class KkandoriAgent(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "완료", msg)
             if report_url:
                 self.log_message(f"[완료] 결과 엑셀 리포트 URL: {report_url}")
-            # 방법3: 동의서 단계 진행분의 전화번호를 고객DB에 자동 적재(매칭)
-            if getattr(self, "_last_consent_ran", False):
-                self._sync_phones_after_consent(getattr(self, "_last_consent_xlsx", None))
         else:
             QtWidgets.QMessageBox.critical(self, "작업 중단/오류", msg)
+
+        # 방법3: 동의서 처리분을 고객DB에 반영(성공=등록완료 표시). 중도중단/실패라도 진행분 반영.
+        if getattr(self, "_last_consent_ran", False):
+            results = getattr(self.current_job_worker, "last_results", None) if self.current_job_worker else None
+            self._sync_customerdb_after_consent(results, getattr(self, "_last_consent_xlsx", None))
 
         import solting_auto.insurance
         solting_auto.insurance.active_instance = None
         self.current_job_worker = None
 
-    def _sync_phones_after_consent(self, xlsx_path):
-        """동의서 진행 엑셀에서 (이름/생년월일/전화)를 추출해 고객DB에 전화번호를 자동 적재.
-        보장분석 수집 데이터와 (이름+생년월일)로 자동 병합된다(upsert COALESCE)."""
+    def _sync_customerdb_after_consent(self, results, xlsx_path):
+        """동의서 처리 결과를 고객DB에 반영. 성공(SUCCESS) 행은 '등록완료'로 표시하고,
+        모든 처리행의 (이름/생년월일/전화)를 upsert 한다. 결과가 없으면 엑셀 연락처로 폴백."""
         try:
             if not (self.supabase and self.tenant and self.device):
                 return
-            if not xlsx_path or not os.path.exists(xlsx_path):
-                return
-            from solting_auto import kb_crawler
-            contacts = kb_crawler._read_excel_contacts([xlsx_path])
-            recs = [{"customer_name": c["customer_name"], "birth": c.get("birth", ""), "phone": c["phone"]}
-                    for c in contacts if c.get("customer_name") and c.get("phone")]
+            import re as _re
+            recs = []
+            if results:
+                for r in results:
+                    name = str(getattr(r, "name", "") or "").strip()
+                    if not name:
+                        continue
+                    digits = _re.sub(r"[^0-9]", "", str(getattr(r, "jumin", "") or ""))
+                    birth = digits[:6] if len(digits) >= 6 else ""
+                    phone = str(getattr(r, "phone", "") or "").strip()
+                    rec = {"customer_name": name, "birth": birth}
+                    if phone:
+                        rec["phone"] = phone
+                    if getattr(r, "status", "") == SUCCESS:
+                        rec["registered"] = True   # 등록완료
+                    recs.append(rec)
+            elif xlsx_path and os.path.exists(xlsx_path):
+                from solting_auto import kb_crawler
+                for c in kb_crawler._read_excel_contacts([xlsx_path]):
+                    if c.get("customer_name"):
+                        recs.append({"customer_name": c["customer_name"], "birth": c.get("birth", ""),
+                                     "phone": c.get("phone")})
+            recs = [r for r in recs if r.get("customer_name")]
             if not recs:
                 return
             n = 0
@@ -2444,9 +2471,10 @@ class KkandoriAgent(QtWidgets.QMainWindow):
                     "p_records": chunk,
                 }).execute()
                 n += res.data if isinstance(res.data, int) else len(chunk)
-            self.log_message(f"[고객DB] 동의서 엑셀 전화번호 {n}건을 고객DB에 자동 적재했습니다.")
+            reg = sum(1 for r in recs if r.get("registered"))
+            self.log_message(f"[고객DB] 동의서 처리 {n}건 고객DB 반영(등록완료 {reg}건).")
         except Exception as e:
-            self.log_message(f"[고객DB] 전화번호 자동 적재 생략(고객DB 미생성 등): {e}")
+            self.log_message(f"[고객DB] 고객DB 반영 생략(고객DB 미생성 등): {e}")
 
     # --- EDMS Automation (Tab 3) ---
     def start_edms_upload(self):
