@@ -1043,6 +1043,17 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         dedup_layout.addStretch()
         step3_layout.addLayout(dedup_layout)
 
+        # 연속 실패 시 자동 재로그인(세션 리셋) — 대량 처리 중 KB 세션 누적한계 극복용(옵트인)
+        relogin_layout = QtWidgets.QHBoxLayout()
+        self.check_auto_relogin = QtWidgets.QCheckBox("🔄 연속 실패 시 자동 재로그인(세션 리셋)")
+        self.check_auto_relogin.setChecked(False)
+        self.check_auto_relogin.setToolTip(
+            "대량 처리 중 KB 세션 누적한계로 연속 실패가 나면, 2단계의 로그인 정보로 자동 재로그인해\n"
+            "세션을 리셋하고 이어서 진행합니다. (2단계에 ID/비밀번호/생년월일이 입력돼 있어야 동작)")
+        relogin_layout.addWidget(self.check_auto_relogin)
+        relogin_layout.addStretch()
+        step3_layout.addLayout(relogin_layout)
+
         # Triggers
         trigger_layout = QtWidgets.QHBoxLayout()
         self.btn_run = QtWidgets.QPushButton("🚀 깐돌이 자동 등록 시작")
@@ -2319,6 +2330,20 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         config["insurance"]["auto_folder_interval"] = self.spin_folder_interval.value()
         # 기등록(로컬) 무시 재처리 옵션
         config["insurance"]["ignore_local_dedup"] = self.check_ignore_dedup.isChecked()
+        # 자동 재로그인용 KB 자격증명 주입 + 연속실패 재로그인 임계(옵트인)
+        _kb_id = self.input_login_id.text().strip()
+        _kb_pw = self.input_login_pw.text().strip()
+        _kb_birth = self.input_login_birth.text().strip()
+        if "credentials" not in config["insurance"]:
+            config["insurance"]["credentials"] = {}
+        if _kb_id:
+            config["insurance"]["credentials"]["username"] = _kb_id
+        if _kb_pw:
+            config["insurance"]["credentials"]["_resolved_password"] = _kb_pw
+        if _kb_birth:
+            config["insurance"]["credentials"]["birthdate"] = _kb_birth
+        config["insurance"]["relogin_fail_threshold"] = (
+            5 if (self.check_auto_relogin.isChecked() and _kb_id and _kb_pw) else 0)
         config["insurance"]["input_mode"] = "batch" if self.radio_input_batch.isChecked() else "single"
 
         config["columns"] = {

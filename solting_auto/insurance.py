@@ -715,10 +715,41 @@ class InsuranceAutomation:
             time.sleep(0.2)
         return False, ""
 
+    def _detect_server_error(self, dialog=None):
+        """KB 서버측 통신오류 팝업(-S0001 / '서버와의 통신중' / 'getCustDeathYn 서비스 결과값 없음' 등)을
+        감지하고 '확인'을 눌러 닫는다. 감지 시 True. → 일시적 KB 서버 오류이므로 쿨다운 후 재시도 대상."""
+        kws = ["서버와의통신", "S0001", "예기치못한오류", "서비스결과값이존재하지",
+               "getCustDeathYn", "정상적으로수행되지"]
+        sels = [".w2floatingLayer", ".w2window", ".w2modal", "div[class*='w2alert']",
+                "div[class*='popup']", "div[class*='modal']", "div[class*='warning']"]
+        for f in self._modal_search_targets(dialog):
+            for sel in sels:
+                try:
+                    loc = f.locator(sel)
+                    cnt = loc.count()
+                except Exception:
+                    continue
+                for idx in range(min(cnt, 15)):
+                    try:
+                        el = loc.nth(idx)
+                        if not el.is_visible():
+                            continue
+                        tc = re.sub(r"\s", "", (el.inner_text() or ""))
+                    except Exception:
+                        continue
+                    if tc and any(k in tc for k in kws):
+                        self.log.info(f"[서버오류] KB 서버 통신오류 팝업 감지 → 확인 닫기: {tc[:60]}")
+                        try:
+                            self._click_modal_button(f, el, ["확인"])
+                        except Exception:
+                            pass
+                        return True
+        return False
+
     def _await_output_or_block(self, dialog, timeout: float = 20.0):
         """출력 버튼 클릭 후, '이미 서면 동의' 차단 모달과 OZ 리포트 뷰어 등장을 동시에 감시한다.
         (입력 시점에 누락된 서면동의 고객이 출력 시점에 늦게 차단 모달을 띄워도 안전하게 잡기 위함)
-        반환: ('blocked', birth6) | ('oz', '') | ('timeout', '')
+        반환: ('blocked', birth6) | ('oz', '') | ('server_error', '') | ('timeout', '')
         """
         import solting_auto
         from . import oz_viewer
@@ -733,7 +764,13 @@ class InsuranceAutomation:
                 handled, kind, birth6 = (False, "", "")
             if handled and kind == "consent_block":
                 return "blocked", birth6
-            # 2) OZ 뷰어가 떴는지 확인 → 떴으면 정상 출력 진행
+            # 2) KB 서버 통신오류 팝업 → 일시 오류로 분류(쿨다운 후 재시도)
+            try:
+                if self._detect_server_error(dialog):
+                    return "server_error", ""
+            except Exception:
+                pass
+            # 3) OZ 뷰어가 떴는지 확인 → 떴으면 정상 출력 진행
             try:
                 if oz_viewer.oz_window_exists(oz_cfg):
                     return "oz", ""
@@ -1171,6 +1208,9 @@ class InsuranceAutomation:
                 self.last_skip_reason = "이미 서면 동의를 받은 고객(2개월 이내)"
                 self.log.info(f"[{name}] 출력 시점 서면동의 완료 차단 알림 감지 → 등록을 건너뜁니다.")
                 raise DuplicateCustomerError("기등록(KB): 이미 서면 동의를 받은 고객(2개월 이내)")
+            if state == "server_error":
+                # KB 서버 통신오류(-S0001 등) → 일시 오류로 보고 쿨다운 후 재시도
+                raise RetryableError("KB 서버 통신 오류(-S0001: 서버와의 통신중 예기치 못한 오류)")
             if state == "timeout":
                 raise RetryableError("출력 후 OZ 뷰어와 차단 알림이 모두 감지되지 않았습니다(타임아웃).")
             try:

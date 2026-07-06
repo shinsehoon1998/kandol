@@ -187,6 +187,11 @@ def process_file(xlsx_path: str, config: dict, logger, dry_run: bool = False,
                 max_consec = int(run.get("max_consecutive_fails", 20))
             except (TypeError, ValueError):
                 max_consec = 20
+            # 연속 실패 시 자동 재로그인(세션 리셋) 임계 — 0이면 비활성(옵트인)
+            try:
+                relogin_threshold = int(config.get("insurance", {}).get("relogin_fail_threshold", 0))
+            except (TypeError, ValueError):
+                relogin_threshold = 0
 
             for rec in records:
                 if stop_check_cb and stop_check_cb():
@@ -214,6 +219,16 @@ def process_file(xlsx_path: str, config: dict, logger, dry_run: bool = False,
                 # 연속 실패 서킷브레이커 — 연속 N건 실패면 세션/브라우저 문제로 보고 자동 중단
                 if res.status == FAIL:
                     consec_fail += 1
+                    # 재로그인 임계 도달 시(서킷브레이커 이전에) 세션 리셋 1회 시도 → 회복되면 계속
+                    if (relogin_threshold > 0 and consec_fail == relogin_threshold
+                            and ins_engine is not None and STAGE_INSURANCE in stages):
+                        try:
+                            logger.info(f"연속 {consec_fail}건 실패 → 세션 리셋 위해 자동 재로그인 시도")
+                            ins_engine.login(force=True)
+                            logger.info("자동 재로그인 성공 — 연속실패 카운트 초기화 후 계속 진행")
+                            consec_fail = 0
+                        except Exception as relog_err:
+                            logger.warning(f"자동 재로그인 실패(계속 진행, 서킷브레이커까지 대기): {relog_err}")
                     if max_consec > 0 and consec_fail >= max_consec:
                         logger.error(f"연속 {consec_fail}건 실패 감지 → 세션 만료/브라우저 문제로 추정하여 자동 중단합니다.")
                         raise RuntimeError(
@@ -409,8 +424,17 @@ def _run_stage(stage, rec, engine, dedup, run, shot_folder, logger, dry_run):
             return SKIP, str(e), ""
         except RetryableError as e:
             if attempt < retry_count:
-                logger.info(f"[{rec.row_no}행] {stage} 재시도 {attempt+1}/{retry_count} - {e}")
-                time.sleep(retry_delay)
+                # KB 서버 통신오류(-S0001 등)는 서버 회복 시간을 위해 더 길게 쿨다운 후 재시도
+                cool = retry_delay
+                if any(k in str(e) for k in ("서버", "통신", "S0001")):
+                    try:
+                        cool = max(retry_delay, int(run.get("server_error_cooldown_sec", 60)))
+                    except (TypeError, ValueError):
+                        cool = max(retry_delay, 60)
+                    logger.info(f"[{rec.row_no}행] {stage} KB 서버오류 감지 → {cool}초 쿨다운 후 재시도 {attempt+1}/{retry_count}")
+                else:
+                    logger.info(f"[{rec.row_no}행] {stage} 재시도 {attempt+1}/{retry_count} - {e}")
+                time.sleep(cool)
                 continue
             _shot(engine, shot_folder, rec.row_no, stage)
             return FAIL, f"재시도 초과: {e}", ""
