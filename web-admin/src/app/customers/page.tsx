@@ -111,10 +111,12 @@ export default function CustomersPage() {
       });
       const j = await res.json().catch(() => ({}));
       if (res.ok && j.ok) {
-        alert(`보픽플래너 전송 완료: ${rows.length}명 (응답코드 ${j.status})`);
+        const r = j.result || {};
+        alert(`보픽플래너 전송 완료! (총 ${rows.length}명 전송)\n\n신규 적재 ${r.inserted ?? '?'}명\n중복 스킵 ${r.skipped ?? 0}명\n오류 ${r.errors ?? 0}건`);
         setSelected(new Set());
       } else {
-        alert(`전송 실패: ${j.error || ('HTTP ' + (j.status || res.status))}\n${(j.response || '').slice(0, 300)}`);
+        const detail = typeof j.result === 'object' ? JSON.stringify(j.result) : (j.result || '');
+        alert(`전송 실패: ${j.error || (j.result && j.result.error) || ('HTTP ' + (j.status || res.status))}\n${String(detail).slice(0, 300)}`);
       }
     } catch (e: any) {
       alert(`전송 오류: ${e.message}`);
