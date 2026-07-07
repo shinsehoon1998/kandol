@@ -13,7 +13,12 @@ export default function CustomersPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [regFilter, setRegFilter] = useState<'all' | 'registered' | 'unregistered'>('all');
   const [phoneFilter, setPhoneFilter] = useState<'all' | 'has' | 'none'>('all');
+  const [premiumFilter, setPremiumFilter] = useState<'all' | 'has' | 'none'>('all');
   const [sending, setSending] = useState(false);
+
+  // 페이지 분할
+  const [pageSize, setPageSize] = useState(100);
+  const [page, setPage] = useState(1);
 
   // 상세 모달 (가입현황 등)
   const [active, setActive] = useState<any | null>(null);
@@ -77,9 +82,19 @@ export default function CustomersPage() {
       if (regFilter === 'unregistered' && c.registered_at) return false;
       if (phoneFilter === 'has' && !c.phone) return false;
       if (phoneFilter === 'none' && c.phone) return false;
+      const hasPremium = c.monthly_premium != null && Number(c.monthly_premium) > 0;
+      if (premiumFilter === 'has' && !hasPremium) return false;
+      if (premiumFilter === 'none' && hasPremium) return false;
       return true;
     });
-  }, [customers, search, regFilter, phoneFilter]);
+  }, [customers, search, regFilter, phoneFilter, premiumFilter]);
+
+  // 필터/검색/페이지크기 변경 시 1페이지로 리셋
+  useEffect(() => { setPage(1); }, [search, regFilter, phoneFilter, premiumFilter, pageSize]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const curPage = Math.min(page, totalPages);
+  const pageRows = filtered.slice((curPage - 1) * pageSize, curPage * pageSize);
 
   const allSelected = filtered.length > 0 && filtered.every((c) => selected.has(c.id));
 
@@ -164,6 +179,12 @@ export default function CustomersPage() {
             <option value="has">전화 있음</option>
             <option value="none">전화 없음</option>
           </select>
+          <select value={premiumFilter} onChange={(e) => setPremiumFilter(e.target.value as any)}
+            className="px-2 py-2 rounded-lg bg-slate-900 border border-slate-700 text-sm text-slate-200">
+            <option value="all">월납보험료: 전체</option>
+            <option value="has">보험료 있음</option>
+            <option value="none">보험료 없음</option>
+          </select>
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
@@ -222,7 +243,7 @@ export default function CustomersPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800 text-sm">
-                {filtered.map((c) => (
+                {pageRows.map((c) => (
                   <tr key={c.id} className={`hover:bg-slate-800/30 ${selected.has(c.id) ? 'bg-emerald-500/5' : ''}`}>
                     <td className="py-4 px-4">
                       <input type="checkbox" checked={selected.has(c.id)} onChange={() => toggleOne(c.id)}
@@ -262,6 +283,35 @@ export default function CustomersPage() {
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {/* 페이지 분할 컨트롤 */}
+        {filtered.length > 0 && (
+          <div className="flex items-center justify-between gap-3 mt-4 pt-4 border-t border-slate-800 flex-wrap">
+            <div className="flex items-center gap-2 text-xs text-slate-400">
+              <span>페이지당</span>
+              <select value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))}
+                className="px-2 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200">
+                <option value={100}>100개</option>
+                <option value={500}>500개</option>
+                <option value={1000}>1000개</option>
+              </select>
+              <span className="ml-2">
+                {(curPage - 1) * pageSize + 1}–{Math.min(curPage * pageSize, filtered.length)} / 총 {filtered.length}명
+              </span>
+            </div>
+            <div className="flex items-center gap-1">
+              <button onClick={() => setPage(1)} disabled={curPage <= 1}
+                className="px-2.5 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-300 text-xs disabled:opacity-40">« 처음</button>
+              <button onClick={() => setPage(curPage - 1)} disabled={curPage <= 1}
+                className="px-2.5 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-300 text-xs disabled:opacity-40">‹ 이전</button>
+              <span className="px-3 text-sm text-slate-300 font-semibold">{curPage} / {totalPages}</span>
+              <button onClick={() => setPage(curPage + 1)} disabled={curPage >= totalPages}
+                className="px-2.5 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-300 text-xs disabled:opacity-40">다음 ›</button>
+              <button onClick={() => setPage(totalPages)} disabled={curPage >= totalPages}
+                className="px-2.5 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-300 text-xs disabled:opacity-40">마지막 »</button>
+            </div>
           </div>
         )}
       </div>
