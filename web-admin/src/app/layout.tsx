@@ -137,7 +137,7 @@ export default function RootLayout({
                   👥 고객DB
                 </Link>
                 <a 
-                  href="https://github.com/shinsehoon1998/kandol/releases/download/v1.6.0/Kkandori_2026-07-06.zip" 
+                  href="https://github.com/shinsehoon1998/kandol/releases/download/v1.7.0/Kkandori_2026-07-07.zip" 
                   target="_blank"
                   rel="noreferrer"
                   className="flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-semibold text-slate-400 hover:bg-slate-800 hover:text-white transition-colors"
