@@ -45,19 +45,24 @@ export default function CustomersPage() {
   }
 
   async function fetchCustomers(tenantId: string, role: string) {
-    let query = supabase
-      .from('customer_records')
-      .select('*, devices(device_name)')
-      .order('crawled_at', { ascending: false });
-
-    if (role !== 'super_admin') {
-      query = query.eq('tenant_id', tenantId);
+    // Supabase(PostgREST)는 1회 조회 최대 1000행 → 1000건씩 페이지네이션으로 전체 로드
+    const pageSize = 1000;
+    const all: any[] = [];
+    for (let from = 0; from < 100000; from += pageSize) {
+      let query = supabase
+        .from('customer_records')
+        .select('*, devices(device_name)')
+        .order('crawled_at', { ascending: false })
+        .range(from, from + pageSize - 1);
+      if (role !== 'super_admin') {
+        query = query.eq('tenant_id', tenantId);
+      }
+      const { data, error } = await query;
+      if (error || !data || data.length === 0) break;
+      all.push(...data);
+      if (data.length < pageSize) break;
     }
-
-    const { data } = await query;
-    if (data) {
-      setCustomers(data);
-    }
+    setCustomers(all);
   }
 
   const filtered = useMemo(() => {
