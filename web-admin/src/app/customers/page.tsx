@@ -9,6 +9,12 @@ export default function CustomersPage() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
 
+  // 선택/필터/전송 상태
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [regFilter, setRegFilter] = useState<'all' | 'registered' | 'unregistered'>('all');
+  const [phoneFilter, setPhoneFilter] = useState<'all' | 'has' | 'none'>('all');
+  const [sending, setSending] = useState(false);
+
   // 상세 모달 (가입현황 등)
   const [active, setActive] = useState<any | null>(null);
 
@@ -56,13 +62,66 @@ export default function CustomersPage() {
 
   const filtered = useMemo(() => {
     const q = search.trim();
-    if (!q) return customers;
-    return customers.filter((c) =>
-      (c.customer_name || '').includes(q) ||
-      (c.birth || '').includes(q) ||
-      (c.phone || '').includes(q)
-    );
-  }, [customers, search]);
+    return customers.filter((c) => {
+      if (q && !(
+        (c.customer_name || '').includes(q) ||
+        (c.birth || '').includes(q) ||
+        (c.phone || '').includes(q)
+      )) return false;
+      if (regFilter === 'registered' && !c.registered_at) return false;
+      if (regFilter === 'unregistered' && c.registered_at) return false;
+      if (phoneFilter === 'has' && !c.phone) return false;
+      if (phoneFilter === 'none' && c.phone) return false;
+      return true;
+    });
+  }, [customers, search, regFilter, phoneFilter]);
+
+  const allSelected = filtered.length > 0 && filtered.every((c) => selected.has(c.id));
+
+  function toggleAll() {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (filtered.every((c) => next.has(c.id))) {
+        filtered.forEach((c) => next.delete(c.id));
+      } else {
+        filtered.forEach((c) => next.add(c.id));
+      }
+      return next;
+    });
+  }
+
+  function toggleOne(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
+  async function handleSendToBopick() {
+    const rows = customers.filter((c) => selected.has(c.id));
+    if (rows.length === 0) return;
+    if (!confirm(`선택한 ${rows.length}명을 보픽플래너로 전송할까요?`)) return;
+    setSending(true);
+    try {
+      const res = await fetch('/api/bopick-send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ customers: rows }),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (res.ok && j.ok) {
+        alert(`보픽플래너 전송 완료: ${rows.length}명 (응답코드 ${j.status})`);
+        setSelected(new Set());
+      } else {
+        alert(`전송 실패: ${j.error || ('HTTP ' + (j.status || res.status))}\n${(j.response || '').slice(0, 300)}`);
+      }
+    } catch (e: any) {
+      alert(`전송 오류: ${e.message}`);
+    } finally {
+      setSending(false);
+    }
+  }
 
   function fmtWon(v: any) {
     if (v === null || v === undefined || v === '') return '-';
@@ -84,14 +143,46 @@ export default function CustomersPage() {
             깐돌이 에이전트가 KB 보장분석에서 수집한 담당 고객 데이터 (개인신용정보 — 취급 주의)
           </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 flex-wrap">
           <span className="text-xs text-slate-500">총 {filtered.length}명</span>
+          <select value={regFilter} onChange={(e) => setRegFilter(e.target.value as any)}
+            className="px-2 py-2 rounded-lg bg-slate-900 border border-slate-700 text-sm text-slate-200">
+            <option value="all">등록: 전체</option>
+            <option value="registered">등록완료만</option>
+            <option value="unregistered">미등록만</option>
+          </select>
+          <select value={phoneFilter} onChange={(e) => setPhoneFilter(e.target.value as any)}
+            className="px-2 py-2 rounded-lg bg-slate-900 border border-slate-700 text-sm text-slate-200">
+            <option value="all">전화: 전체</option>
+            <option value="has">전화 있음</option>
+            <option value="none">전화 없음</option>
+          </select>
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="고객명 / 생년월일 / 전화번호 검색"
             className="px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500 w-56"
           />
+        </div>
+      </div>
+
+      {/* 선택/전송 툴바 */}
+      <div className="flex items-center justify-between gap-3 rounded-xl bg-slate-900 border border-slate-800 px-4 py-3">
+        <div className="text-sm text-slate-300">
+          선택 <span className="font-bold text-blue-400">{selected.size}</span>명
+          <span className="text-slate-500 text-xs ml-2">(체크 후 보픽플래너로 전송)</span>
+        </div>
+        <div className="flex items-center gap-2">
+          {selected.size > 0 && (
+            <button onClick={() => setSelected(new Set())}
+              className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold border border-slate-700">
+              선택 해제
+            </button>
+          )}
+          <button onClick={handleSendToBopick} disabled={selected.size === 0 || sending}
+            className={`px-4 py-2 rounded-lg text-sm font-bold transition-colors ${selected.size === 0 || sending ? 'bg-slate-800 text-slate-600 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-500 text-white'}`}>
+            {sending ? '전송 중...' : `📤 보픽플래너로 전송 (${selected.size})`}
+          </button>
         </div>
       </div>
 
@@ -105,6 +196,10 @@ export default function CustomersPage() {
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="border-b border-slate-800 text-xs font-bold text-slate-400 uppercase tracking-wider">
+                  <th className="py-3 px-4">
+                    <input type="checkbox" checked={allSelected} onChange={toggleAll}
+                      className="w-4 h-4 accent-emerald-500 cursor-pointer" title="전체 선택/해제" />
+                  </th>
                   <th className="py-3 px-4">고객명</th>
                   <th className="py-3 px-4">생년월일</th>
                   <th className="py-3 px-4">전화번호</th>
@@ -121,7 +216,11 @@ export default function CustomersPage() {
               </thead>
               <tbody className="divide-y divide-slate-800 text-sm">
                 {filtered.map((c) => (
-                  <tr key={c.id} className="hover:bg-slate-800/30">
+                  <tr key={c.id} className={`hover:bg-slate-800/30 ${selected.has(c.id) ? 'bg-emerald-500/5' : ''}`}>
+                    <td className="py-4 px-4">
+                      <input type="checkbox" checked={selected.has(c.id)} onChange={() => toggleOne(c.id)}
+                        className="w-4 h-4 accent-emerald-500 cursor-pointer" />
+                    </td>
                     <td className="py-4 px-4 font-bold text-slate-200">{c.customer_name}</td>
                     <td className="py-4 px-4 text-slate-300">{c.birth || '-'}</td>
                     <td className="py-4 px-4 font-mono text-slate-300">{c.phone || '-'}</td>
