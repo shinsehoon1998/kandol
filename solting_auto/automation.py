@@ -24,6 +24,10 @@ class DuplicateCustomerError(Exception):
     """최근 2개월 이내 중복 등록 이력 존재로 스킵하는 오류."""
 
 
+class DataSkipError(Exception):
+    """행 데이터 문제(이름 형식 오류 등)로 이 행만 SKIP(재시도/실패 아님, 서킷브레이커 제외)."""
+
+
 class SoltingAutomation:
     def __init__(self, config: dict, logger):
         self.cfg = config

@@ -405,7 +405,7 @@ def _run_stage(stage, rec, engine, dedup, run, shot_folder, logger, dry_run):
         logger.info(f"[{rec.row_no}행] {stage} (dry-run) 등록 대상 OK")
         return SUCCESS, "(dry-run)", ""
 
-    from .automation import RegisterError, RetryableError, DuplicateCustomerError
+    from .automation import RegisterError, RetryableError, DuplicateCustomerError, DataSkipError
     retry_count = run.get("retry_count", 2)
     retry_delay = run.get("retry_delay_sec", 3)
 
@@ -421,6 +421,10 @@ def _run_stage(stage, rec, engine, dedup, run, shot_folder, logger, dry_run):
             return SUCCESS, "", pdf
         except DuplicateCustomerError as e:
             logger.info(f"[{rec.row_no}행] {stage} 건너뜀 - {e}")
+            return SKIP, str(e), ""
+        except DataSkipError as e:
+            # 행 데이터 문제(이름 형식 등) → SKIP (재시도/실패 아님, 서킷브레이커 카운트 제외)
+            logger.info(f"[{rec.row_no}행] {stage} 데이터 SKIP - {e}")
             return SKIP, str(e), ""
         except RetryableError as e:
             if attempt < retry_count:

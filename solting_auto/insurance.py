@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 from .validators import normalize_phone, normalize_digits
-from .automation import RegisterError, RetryableError, DuplicateCustomerError
+from .automation import RegisterError, RetryableError, DuplicateCustomerError, DataSkipError
 from .reporter import SUCCESS, FAIL, SKIP
 
 
@@ -746,10 +746,45 @@ class InsuranceAutomation:
                         return True
         return False
 
+    def _detect_name_error(self, dialog=None):
+        """KB 입력검증 팝업('고객 이름을 정확히 입력해주세요' 등)을 감지하고 확인을 눌러 닫는다.
+        감지 시 True. → 해당 행은 데이터 문제이므로 재시도/실패가 아니라 SKIP 처리(서킷브레이커 제외)."""
+        sels = [".w2floatingLayer", ".w2window", ".w2modal", "div[class*='w2alert']",
+                "div[class*='popup']", "div[class*='modal']", "div[class*='confirm']"]
+        for f in self._modal_search_targets(dialog):
+            for sel in sels:
+                try:
+                    loc = f.locator(sel)
+                    cnt = loc.count()
+                except Exception:
+                    continue
+                for idx in range(min(cnt, 15)):
+                    try:
+                        el = loc.nth(idx)
+                        if not el.is_visible():
+                            continue
+                        tc = re.sub(r"\s", "", (el.inner_text() or ""))
+                    except Exception:
+                        continue
+                    if tc and "이름" in tc and ("정확히입력" in tc or "정확히" in tc or "이름을입력" in tc):
+                        # 메인 입력폼(입력칸 포함) 오탐 방지
+                        try:
+                            if el.locator("input[id*='iptCustNm'], input[id*='iptCustIdno']").count() > 0:
+                                continue
+                        except Exception:
+                            pass
+                        self.log.info(f"[이름오류] KB 이름 입력검증 팝업 감지 → 확인 닫고 이 행 SKIP: {tc[:50]}")
+                        try:
+                            self._click_modal_button(f, el, ["확인"])
+                        except Exception:
+                            pass
+                        return True
+        return False
+
     def _await_output_or_block(self, dialog, timeout: float = 20.0):
         """출력 버튼 클릭 후, '이미 서면 동의' 차단 모달과 OZ 리포트 뷰어 등장을 동시에 감시한다.
         (입력 시점에 누락된 서면동의 고객이 출력 시점에 늦게 차단 모달을 띄워도 안전하게 잡기 위함)
-        반환: ('blocked', birth6) | ('oz', '') | ('server_error', '') | ('timeout', '')
+        반환: ('blocked', birth6) | ('oz', '') | ('server_error','') | ('name_error','') | ('timeout','')
         """
         import solting_auto
         from . import oz_viewer
@@ -768,6 +803,12 @@ class InsuranceAutomation:
             try:
                 if self._detect_server_error(dialog):
                     return "server_error", ""
+            except Exception:
+                pass
+            # 2.5) KB 이름 입력검증 오류 팝업 → 데이터 문제(해당 행만 SKIP)
+            try:
+                if self._detect_name_error(dialog):
+                    return "name_error", ""
             except Exception:
                 pass
             # 3) OZ 뷰어가 떴는지 확인 → 떴으면 정상 출력 진행
@@ -1211,6 +1252,9 @@ class InsuranceAutomation:
             if state == "server_error":
                 # KB 서버 통신오류(-S0001 등) → 일시 오류로 보고 쿨다운 후 재시도
                 raise RetryableError("KB 서버 통신 오류(-S0001: 서버와의 통신중 예기치 못한 오류)")
+            if state == "name_error":
+                # KB 이름 입력검증 오류 → 데이터 문제, 이 행만 SKIP(재시도/서킷브레이커 제외)
+                raise DataSkipError("데이터오류: 고객 이름 형식 오류(KB '이름을 정확히 입력') — 엑셀 이름/열 정렬 확인")
             if state == "timeout":
                 raise RetryableError("출력 후 OZ 뷰어와 차단 알림이 모두 감지되지 않았습니다(타임아웃).")
             try:
@@ -1397,45 +1441,56 @@ class InsuranceAutomation:
                     loc = f.locator(selector)
                     if loc.count() > 0 and loc.first.is_visible():
                         self.log.info(f"[{field_type}] 셀렉터 '{selector}' 발견. 강제 포커싱 및 물리 타이핑을 시작합니다.")
-                        
-                        # 1. 클릭 시도 (절대 좌표 또는 일반 클릭)
-                        try:
-                            box = loc.first.bounding_box()
-                            if box:
-                                cx = box["x"] + box["width"] / 2
-                                cy = box["y"] + box["height"] / 2
-                                self.log.info(f"[{field_type}] 절대 좌표 ({cx}, {cy})로 마우스 강제 물리 클릭을 실행합니다.")
-                                self.page.mouse.click(cx, cy)
-                            else:
-                                loc.first.click(force=True, timeout=500)
-                        except Exception as click_err:
-                            self.log.warning(f"[{field_type}] 클릭 실패했으나 강제 포커싱 진행: {click_err}")
-                            
-                        # 2. 강제 focus 스크립트 실행
-                        loc.first.evaluate("el => el.focus()")
-                        time.sleep(0.3)
-                        
-                        # 3. 기존 값 제거
-                        loc.first.press("Control+A")
-                        loc.first.press("Backspace")
-                        time.sleep(0.1)
-                        
-                        # 4. 물리 keyboard 타이핑 (180ms 딜레이)
-                        for char in str(value):
-                            self.page.keyboard.type(char)
-                            time.sleep(0.18)
-                            
-                        time.sleep(0.2)
-                        
-                        # 5. 확실한 blur 및 change/input 이벤트 강제 전달로 데이터 바인딩 트리거 (포커스 튐 방지)
-                        loc.first.evaluate("""e => {
-                            e.blur();
-                            e.dispatchEvent(new Event('change', { bubbles: true }));
-                            e.dispatchEvent(new Event('input', { bubbles: true }));
-                        }""")
-                        time.sleep(0.2)
-                        self.log.info(f"[{field_type}] 모든 프레임 탐색을 통해 셀렉터 '{selector}'에 물리 타이핑 및 이벤트 디스패치를 완료했습니다.")
-                        return
+                        want = str(value).strip()
+                        _is_name = ("이름" in field_type or "성명" in field_type)
+                        _norm = lambda s: re.sub(r"[^0-9가-힣A-Za-z]", "", s or "")
+                        # 이름 필드는 실제 반영 여부를 읽어 확인 후, 미반영이면 재입력(최대 3회)
+                        for _fill_try in range(3 if _is_name else 1):
+                            # 1. 클릭 시도 (절대 좌표 또는 일반 클릭)
+                            try:
+                                box = loc.first.bounding_box()
+                                if box:
+                                    cx = box["x"] + box["width"] / 2
+                                    cy = box["y"] + box["height"] / 2
+                                    self.page.mouse.click(cx, cy)
+                                else:
+                                    loc.first.click(force=True, timeout=500)
+                            except Exception as click_err:
+                                self.log.warning(f"[{field_type}] 클릭 실패했으나 강제 포커싱 진행: {click_err}")
+                            # 2. 강제 focus
+                            loc.first.evaluate("el => el.focus()")
+                            time.sleep(0.3)
+                            # 3. 기존 값 제거
+                            loc.first.press("Control+A")
+                            loc.first.press("Backspace")
+                            time.sleep(0.1)
+                            # 4. 물리 keyboard 타이핑
+                            for char in want:
+                                self.page.keyboard.type(char)
+                                time.sleep(0.18)
+                            time.sleep(0.2)
+                            # 5. blur + change/input 이벤트 강제 전달(데이터 바인딩 트리거)
+                            loc.first.evaluate("""e => {
+                                e.blur();
+                                e.dispatchEvent(new Event('change', { bubbles: true }));
+                                e.dispatchEvent(new Event('input', { bubbles: true }));
+                            }""")
+                            time.sleep(0.2)
+                            # 6. 이름 필드는 실제 반영 검증(빈칸이면 재입력) — 주민 필드는 마스킹 우려로 검증 생략
+                            if not _is_name:
+                                self.log.info(f"[{field_type}] 셀렉터 '{selector}' 물리 타이핑 완료.")
+                                return
+                            try:
+                                got = loc.first.input_value() or ""
+                            except Exception:
+                                got = ""
+                            if _norm(want) and _norm(got) == _norm(want):
+                                self.log.info(f"[{field_type}] 입력 검증 완료('{got.strip()}') — 반영 확인.")
+                                return
+                            self.log.warning(f"[{field_type}] 입력값 미반영(기대 '{want}' / 실제 '{got}') → 재입력 {_fill_try+1}/3")
+                            time.sleep(0.3)
+                        if _is_name:
+                            self.log.warning(f"[{field_type}] 3회 재입력에도 값 미반영 — 다음 탐색 경로/자가치유로 진행")
                 except Exception as e:
                     self.log.warning(f"[{field_type}] 셀렉터 '{selector}' 입력 도중 오류 발생, 계속 진행: {e}")
                     continue

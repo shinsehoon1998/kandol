@@ -297,6 +297,21 @@ class AutomationWorker(QtCore.QThread):
                 except Exception as shot_err:
                     logger.error(f"에러 화면 캡처 업로드 실패: {shot_err}")
 
+            # 실패/중단 시에도 결과 리포트(행별 사유) 업로드 → 감사로그에서 원격 확인
+            fail_report_url = None
+            try:
+                out_dir = Path(self.config.get("run", {}).get("output_folder", str(APP_DIR / "output")))
+                reports = sorted(out_dir.glob("result_*.xlsx"), key=lambda p: p.stat().st_mtime)
+                if reports:
+                    storage_key = f"reports/{self.log_id}_result.xlsx"
+                    with open(reports[-1], "rb") as f:
+                        self.supabase.storage.from_("error-screenshots").upload(
+                            path=storage_key, file=f,
+                            file_options={"content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "upsert": "true"})
+                    fail_report_url = self.supabase.storage.from_("error-screenshots").get_public_url(storage_key)
+            except Exception as rep_err:
+                logger.error(f"실패/중단 리포트 업로드 생략: {rep_err}")
+
             # Update DB with error status via RPC
             try:
                 self.supabase.rpc("update_execution_log_status_via_device", {
@@ -304,7 +319,7 @@ class AutomationWorker(QtCore.QThread):
                     "p_status": "stopped" if is_stopped else "failed",
                     "p_error_reason": str(e),
                     "p_error_screenshot_url": screenshot_url,
-                    "p_report_file_url": None
+                    "p_report_file_url": fail_report_url
                 }).execute()
             except Exception:
                 pass

@@ -42,6 +42,12 @@ def validate_name(value) -> FieldResult:
     name = "" if value is None else str(value).strip()
     if not name:
         return FieldResult(False, "이름 누락")
+    # KB가 거부하는 불량 이름을 사전 차단(서버 왕복/서킷브레이커 오판 방지).
+    # 고정밀 규칙만 사용(정상 한글/영문 이름 오탐 방지):
+    if any(ch.isdigit() for ch in name):
+        return FieldResult(False, "이름에 숫자 포함(엑셀 열 정렬/데이터 확인 필요)")
+    if len(name) > 20:
+        return FieldResult(False, f"이름 길이 이상({len(name)}자 — 주소/기타값 혼입 의심)")
     return FieldResult(True)
 
 
