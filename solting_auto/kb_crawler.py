@@ -517,6 +517,427 @@ def _extract_via_websquare(page, logger=None):
     return mapped, _score_customer_array(mapped)
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# 고객 상세(가입현황) 수집 — 더블클릭으로 진입한 상세 화면에서 담보별 보장/계약현황/
+# 보장현황 요약/월보험료/보유계약리스트를 읽는다. 그리드는 데이터모델(getCellData)로
+# 전체를 즉시 읽고, 보유계약(카드형)·요약(미가입/부족/충분)은 DOM 텍스트로 파싱한다.
+# (라이브 검증: grd_bcvrInscoBcsfcGuarntInfo 37행, grd_contInfo, 보유계약 5건, 월보험료.)
+# ─────────────────────────────────────────────────────────────────────────
+
+# 상세 그리드가 로드된 프레임인지 판별하는 키 그리드 접미사
+_DETAIL_KEY_SUFFIX = "grd_bcvrInscoBcsfcGuarntInfo"
+
+# '모두펼치기' 토글을 ON으로 만든다(멱등: 이미 펼쳐져 있으면 건드리지 않음).
+# 토글 라벨 span(class ch_cmmn_swctxt, text '모두펼치기')을 클릭. 펼침 여부는
+# 담보 아래 개별상품(보험사명) 행이 렌더되는지로 판단하기 어려워, 상태 텍스트로 근사.
+_EXPAND_ALL_JS = r"""() => {
+  const spans=[...document.querySelectorAll('span,a,label,button')]
+    .filter(e=>((e.innerText||'').trim()==='모두펼치기'));
+  if(!spans.length) return 'no-toggle';
+  // 이미 ON인지: 인근 스위치 input(checked) 또는 aria-pressed 확인
+  const s=spans[0];
+  let on=false;
+  const box=s.closest('label,div,span')||s;
+  const chk=box.querySelector('input[type=checkbox]');
+  if(chk) on=!!chk.checked;
+  if(!on){
+    try{ s.click(); }catch(e){}
+    try{ s.dispatchEvent(new MouseEvent('click',{bubbles:true})); }catch(e){}
+    return 'clicked';
+  }
+  return 'already-on';
+}"""
+
+# 상세의 '가입현황' 서브탭을 활성화한다(보유계약리스트·전체보장현황은 이 탭에서만 렌더).
+# 사용자 플로우: 더블클릭 → '가입현황' 클릭 → '모두펼치기' ON.
+_ACTIVATE_GAIP_JS = r"""() => {
+  // 상세 서브탭 바(w2tabcontrol_li)에서 '가입현황' 탭을 찾아 그 앵커를 클릭한다.
+  // (라이브 검증: 전역 최소자식 요소 클릭은 오작동, 탭 LI의 <a> 클릭이 정확히 전환됨.)
+  const lis=[...document.querySelectorAll('[class*=w2tabcontrol_li]')]
+    .filter(li=>li.offsetParent && (li.innerText||'').trim()==='가입현황');
+  if(lis.length){
+    const li=lis[0];
+    if(/active|selected/.test(li.className||'')) return 'already-on';
+    const a=li.querySelector('a')||li;
+    try{ a.click(); }catch(e){}
+    try{ a.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true})); }catch(e){}
+    return 'clicked-tab';
+  }
+  // 폴백: 텍스트가 정확히 '가입현황'인 앵커/버튼
+  const alt=[...document.querySelectorAll('a,button,li,span')]
+    .filter(e=>e.offsetParent && (e.innerText||'').trim()==='가입현황');
+  if(alt.length){ try{ alt[0].click(); }catch(e){} return 'clicked-alt'; }
+  return 'no-tab';
+}"""
+
+# 현재 열린 상세 화면의 모든 데이터를 읽어 구조화 객체로 반환.
+_DETAIL_JS = r"""() => {
+  if(!window.$p || typeof $p.getComponentById!=='function') return null;
+  const bySuffix = suf => [...document.querySelectorAll('.w2grid')].find(g=>g.id.endsWith(suf));
+  const readGrid = (suf) => {
+    const el=bySuffix(suf); if(!el) return null;
+    let c; try{ c=$p.getComponentById(el.id); }catch(e){ return null; }
+    if(!c || typeof c.getRowCount!=='function') return null;
+    let n=0,k=0; try{ n=c.getRowCount(); k=c.getColumnCount(); }catch(e){ return null; }
+    const th=[...el.querySelectorAll('th')].map(x=>(x.innerText||'').trim()).filter(Boolean).slice(0,k);
+    const rows=[];
+    for(let r=0;r<n;r++){
+      const o={};
+      for(let j=0;j<k;j++){ let v=''; try{ v=c.getCellData(r,j); }catch(e){}
+        const key=(th[j]&&th[j].trim())?th[j].trim():('col'+j);
+        o[key]= v==null?'':String(v).replace(/<br\/?>/g,'/').trim(); }
+      rows.push(o);
+    }
+    return {header:th, rows};
+  };
+
+  const bt=document.body.innerText||'';
+  const num = re => { const m=bt.match(re); return m?m[1]:null; };
+
+  // 담보별 전체보장현황(37) / 가입담보상세 / 계약현황(정상·실효)
+  const cover = readGrid('grd_bcvrInscoBcsfcGuarntInfo');
+  const cvrDetail = readGrid('grd_cvrDetailInfo');
+  const cont = readGrid('grd_contInfo');
+
+  // 보장현황 요약: 미가입/부족/충분
+  const summary = {
+    미가입: num(/미가입[\s\S]{0,6}?([0-9]+)\s*건/),
+    부족:   num(/부족[\s\S]{0,6}?([0-9]+)\s*건/),
+    충분:   num(/충분[\s\S]{0,6}?([0-9]+)/),
+  };
+
+  // 월보험료
+  const premium = num(/월보험료[\s:]*([0-9,]+)\s*원/);
+
+  // 보유계약리스트(카드형): 각 계약카드는 class 'ch_pc_cmlst_item'(라이브 검증).
+  // 헤딩 부모체인엔 카드가 없어(형제 서브트리) 카드를 직접 선택해 파싱한다.
+  let contracts=[];
+  const items=[...document.querySelectorAll('[class*=cmlst_item]')]
+    .filter(e=>e.offsetParent && /보험기간/.test(e.innerText||''));
+  for(const it of items){
+    const lines=(it.innerText||'').split('\n').map(s=>s.trim()).filter(Boolean);
+    let period='',product='',cond='',monthly='';
+    for(let i=0;i<lines.length;i++){
+      if(/^보험기간/.test(lines[i])){
+        period=lines[i].replace(/^보험기간/,'').trim();
+        product=lines[i+1]||'';
+        cond=lines[i+2]||'';
+      }
+      const m=(lines[i]||'').match(/([0-9]{1,3}(?:,[0-9]{3})+)\s*원/);
+      if(m) monthly=m[1];
+    }
+    if(product && !/^총|^정상|^실효/.test(product))
+      contracts.push({period, product, cond, monthly});
+  }
+
+  // 상세 화면의 고객 식별(교차오염 검증용):
+  //  ① 탭/프로필의 '{이름}고객님 {주민7}' 우선(가장 안정적)
+  //  ② 보유계약 조건의 (피)이름 보조
+  let insured=null, insured_birth=null;
+  const pm=bt.match(/([가-힣]{2,4})\s*고객님[\s\S]{0,12}?(\d{6})\d?/);
+  if(pm){ insured=pm[1]; insured_birth=pm[2]; }
+  if(!insured){ for(const c of contracts){ const m=(c.cond||'').match(/\(피\)\s*([가-힣]{2,4})/); if(m){ insured=m[1]; break; } } }
+
+  return {
+    insured,                 // 상세 화면 고객명 — 대조용
+    insured_birth,           // 상세 화면 생년월일6 — 대조 보조
+    monthly_premium: premium,
+    coverage_summary: summary,
+    contract_status: cont ? cont.rows : null,
+    coverage_detail: cover ? {header:cover.header, rows:cover.rows,
+                              detail: cvrDetail?cvrDetail.rows:null} : null,
+    contracts,
+  };
+}"""
+
+
+def _find_detail_frame(page):
+    """상세 그리드(grd_bcvrInscoBcsfcGuarntInfo)가 로드된 프레임을 찾는다."""
+    frames = []
+    try:
+        frames = list(page.frames)
+    except Exception:
+        frames = [page]
+    for fr in frames:
+        try:
+            has = fr.evaluate(
+                "(suf)=>!![...document.querySelectorAll('.w2grid')].find(g=>g.id.endsWith(suf))",
+                _DETAIL_KEY_SUFFIX)
+            if has:
+                return fr
+        except Exception:
+            continue
+    return None
+
+
+def _read_open_detail(page, logger=None, expand=True):
+    """현재 열린 상세 화면을 읽어 구조화 dict 반환(없으면 None).
+    expand=True 면 '모두펼치기'를 ON으로 만든 뒤 읽는다."""
+    fr = _find_detail_frame(page)
+    if not fr:
+        return None
+    # '가입현황' 서브탭 활성화(보유계약리스트·전체보장현황 렌더 선행조건)
+    try:
+        fr.evaluate(_ACTIVATE_GAIP_JS)
+        # 가입현황 탭 전환 후 보유계약리스트(cmlst_item) 렌더까지 폴링 대기(최대 ~2초)
+        for _ in range(8):
+            page.wait_for_timeout(250)
+            try:
+                if fr.evaluate("()=>[...document.querySelectorAll('[class*=cmlst_item]')]"
+                               ".some(e=>/보험기간/.test(e.innerText||''))"):
+                    break
+            except Exception:
+                pass
+    except Exception:
+        pass
+    if expand:
+        try:
+            fr.evaluate(_EXPAND_ALL_JS)
+            page.wait_for_timeout(450)   # 펼침 렌더 대기(이벤트 펌프)
+        except Exception:
+            pass
+    try:
+        return fr.evaluate(_DETAIL_JS)
+    except Exception as e:
+        if logger:
+            logger.info(f"[상세] 읽기 실패(무시): {e}")
+        return None
+
+
+def _merge_detail_into_record(rec, detail):
+    """읽은 상세(detail)를 정규화 레코드(rec)에 병합. 보유계약은 raw.contracts 에 보관
+    (마이그레이션 없이 기존 JSONB 컬럼만 사용)."""
+    if not detail:
+        return rec
+    if detail.get("coverage_summary") and any(detail["coverage_summary"].values()):
+        rec["coverage_summary"] = detail["coverage_summary"]
+    if detail.get("contract_status"):
+        rec["contract_status"] = detail["contract_status"]
+    if detail.get("coverage_detail"):
+        rec["coverage_detail"] = detail["coverage_detail"]
+    # 월보험료: 상세값이 있으면 목록값보다 우선(정확)
+    prem = detail.get("monthly_premium")
+    if prem:
+        rec["monthly_premium"] = re.sub(r"[^0-9]", "", str(prem)) or rec.get("monthly_premium")
+    # 보유계약 + 상세수집 표식은 raw 안에 저장(스키마 변경 불필요)
+    raw = rec.get("raw")
+    if not isinstance(raw, dict):
+        raw = {"_list": raw}
+    if detail.get("contracts"):
+        raw["contracts"] = detail["contracts"]
+    raw["detail_collected"] = True
+    rec["raw"] = raw
+    return rec
+
+
+def _iframe_chain_offset(frame):
+    """중첩 iframe 체인의 뷰포트 오프셋(x,y) 합산 — 프레임 내 좌표를 페이지 좌표로 변환."""
+    try:
+        return frame.evaluate(
+            "()=>{let x=0,y=0,w=window;try{while(w!==w.parent){const fe=w.frameElement;"
+            "const r=fe.getBoundingClientRect();x+=r.x;y+=r.y;w=w.parent;}}catch(e){}return{x,y};}")
+    except Exception:
+        return {"x": 0, "y": 0}
+
+
+def _visible_list_frame_grid(page):
+    """화면에 '보이는' 보장분석 고객 목록 그리드를 (frame, gid)로 반환.
+    (라이브 검증: 목록 그리드 grdSmtgranHistInfo, 헤더 월보험료+생년월일)."""
+    for fr in list(page.frames):
+        try:
+            g = fr.evaluate(
+                "()=>{const el=[...document.querySelectorAll('.w2grid')].find(g=>{"
+                "const th=[...g.querySelectorAll('th')].map(x=>x.innerText||'').join('|');"
+                "return th.includes('월보험료')&&th.includes('생년월일')&&g.offsetParent;});"
+                "return el?el.id:null;}")
+            if g:
+                return fr, g
+        except Exception:
+            continue
+    return None, None
+
+
+def _return_to_list(page):
+    """상세 화면에서 '(차세대)보장분석 메인' 탭을 눌러 목록으로 복귀.
+    (라이브 검증: 이 탭 클릭 시 목록이 다시 보이고 상세가 닫힌다.)"""
+    for fr in list(page.frames):
+        try:
+            ok = fr.evaluate(
+                "()=>{const lis=[...document.querySelectorAll('[class*=w2tabcontrol_li]')]"
+                ".filter(li=>li.offsetParent&&/보장분석 메인/.test(li.innerText||''));"
+                "if(!lis.length)return 0;(lis[0].querySelector('a')||lis[0]).click();return 1;}")
+            if ok:
+                page.wait_for_timeout(900)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _list_rows_via_model(frame, gid):
+    """목록 데이터모델에서 (name, birth6) 순서대로 전체 반환(col1=custNm, col2=생년월일)."""
+    try:
+        return frame.evaluate(
+            "(g)=>{const c=$p.getComponentById(g);const n=c.getRowCount();const o=[];"
+            "for(let i=0;i<n;i++){o.push({name:String(c.getCellData(i,1)||'').trim(),"
+            "birth:String(c.getCellData(i,2)||'').replace(/[^0-9]/g,'').slice(0,6)});}return o;}", gid)
+    except Exception:
+        return []
+
+
+def _dblclick_customer_by_name(page, frame, gid, name):
+    """목록을 여러 스크롤 위치로 훑으며 custNm==name 행을 찾아 실제 마우스 더블클릭.
+    (WebSquare 가상 그리드: 스크롤 좌표가 압축돼 인덱스 계산이 부정확하므로 이름으로 탐색.)"""
+    try:
+        mx = frame.evaluate(
+            "(g)=>{const sy=document.getElementById(g).querySelector('[class*=w2grid_scrollY]');"
+            "return sy?sy.scrollHeight-sy.clientHeight:0;}", gid) or 0
+    except Exception:
+        mx = 0
+    off = _iframe_chain_offset(frame)
+    for frac in (0, 0.25, 0.5, 0.75, 1.0):
+        try:
+            frame.evaluate(
+                "([g,st])=>{const sy=document.getElementById(g).querySelector('[class*=w2grid_scrollY]');"
+                "if(sy){sy.scrollTop=st;sy.dispatchEvent(new Event('scroll',{bubbles:true}));}}",
+                [gid, int(mx * frac)])
+        except Exception:
+            pass
+        page.wait_for_timeout(350)
+        try:
+            r = frame.evaluate(
+                "([g,nm])=>{const root=document.getElementById(g);"
+                "for(const tr of [...root.querySelectorAll('tr')].filter(r=>r.offsetParent)){"
+                "const td=tr.querySelector('td[col_id=custNm]');"
+                "if(td&&td.innerText.trim()===nm){const rc=td.getBoundingClientRect();"
+                "return{x:rc.x+rc.width/2,y:rc.y+rc.height/2};}}return null;}", [gid, name])
+        except Exception:
+            r = None
+        if r:
+            try:
+                page.mouse.dblclick(r["x"] + off["x"], r["y"] + off["y"])
+                return True
+            except Exception:
+                return False
+    return False
+
+
+def _norm_key(name, birth):
+    return ((name or "").strip(), re.sub(r"[^0-9]", "", str(birth or ""))[:6])
+
+
+def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
+                     detail_limit=None, skip_keys=None, batch_cap=300):
+    """목록에서 각 고객을 더블클릭해 상세를 수집, results 각 레코드에 병합.
+    라이브 검증 플로우: (보장분석 메인 탭 복귀) → 이름매칭 더블클릭 → 상세 폴링·대조 →
+    모두펼치기 ON 읽기 → 복귀 → 다음.
+    - skip_keys: 이미 상세 수집된 (name,birth6) 집합 → 증분(재실행=이어받기).
+    - detail_limit/batch_cap: 한 세션 상한(세션 누적한계 방어).
+    - 고객명 대조로 교차오염 차단, 행별 최대 2회 재시도, 실패는 개별 skip."""
+    skip_keys = skip_keys or set()
+    _return_to_list(page)          # 상세가 열려 있었다면 목록으로
+    page.wait_for_timeout(600)
+    fr, gid = _visible_list_frame_grid(page)
+    if not fr:
+        if logger:
+            logger.info("[상세] 보장분석 목록이 화면에 보이지 않습니다. '보장분석' 고객목록 화면을 띄워주세요.")
+        return 0
+    list_rows = _list_rows_via_model(fr, gid)
+    if not list_rows:
+        if logger:
+            logger.info("[상세] 목록 데이터모델을 읽지 못했습니다.")
+        return 0
+
+    by_key = {}
+    for rec in results:
+        by_key.setdefault(_norm_key(rec["customer_name"], rec["birth"]), rec)
+
+    cap = min(batch_cap, detail_limit or batch_cap)
+    targets = [lr for lr in list_rows
+               if _norm_key(lr["name"], lr["birth"])[0]
+               and _norm_key(lr["name"], lr["birth"]) not in skip_keys
+               and (by_key.get(_norm_key(lr["name"], lr["birth"]))
+                    or by_key.get((_norm_key(lr["name"], lr["birth"])[0], "")))]
+    total_targets = min(len(targets), cap)
+    if logger:
+        logger.info(f"[상세] 대상 {total_targets}명(전체 목록 {len(list_rows)} / 기수집 skip {len(skip_keys)}).")
+
+    done = 0
+    for lr in targets:
+        if stop_cb and stop_cb():
+            break
+        if done >= cap:
+            if logger:
+                logger.info(f"[상세] 배치 상한({cap}) 도달 — 나머지는 다음 실행에서 이어받기.")
+            break
+        key = _norm_key(lr["name"], lr["birth"])
+        rec = by_key.get(key) or by_key.get((key[0], ""))
+        got = None
+        for attempt in range(2):
+            fr, gid = _visible_list_frame_grid(page)
+            if not fr:
+                _return_to_list(page)
+                page.wait_for_timeout(700)
+                fr, gid = _visible_list_frame_grid(page)
+            if not fr:
+                break
+            if not _dblclick_customer_by_name(page, fr, gid, lr["name"]):
+                if logger and attempt == 0:
+                    logger.info(f"[상세] {key[0]} 목록에서 행을 못 찾음 — 재시도.")
+                _return_to_list(page)
+                page.wait_for_timeout(600)
+                continue
+            # 진입 직후 상세가 '전체요약'으로 로딩되는 동안 대기(라이브 검증: settle 전 가입현황
+            # 클릭은 씹혀 보유계약이 렌더되지 않음). 상세 프레임이 뜰 때까지 최대 ~4초 대기.
+            for _ in range(16):
+                page.wait_for_timeout(250)
+                if _find_detail_frame(page):
+                    break
+            page.wait_for_timeout(1800)
+            # 상세 로딩 폴링(최대 10초) + 고객 대조(교차오염 차단).
+            # insured 가 잡혀도 보유계약리스트(DOM) 렌더는 조금 늦으므로, 매칭 후에도
+            # 보유계약이 채워질 때까지(추가 최대 3.5초) 계속 읽어 확정한다.
+            deadline = time.time() + 10
+            matched = None
+            contract_deadline = None
+            while time.time() < deadline:
+                page.wait_for_timeout(500)
+                det = _read_open_detail(page, logger, expand=True)
+                if not (det and det.get("insured")):
+                    continue
+                if not (det["insured"] == key[0] or (key[1] and det.get("insured_birth", "")[:6] == key[1])):
+                    break   # 다른 고객이 열림 → 이번 시도 실패로 간주
+                matched = det
+                if det.get("contracts"):
+                    break   # 보유계약까지 확보 → 확정
+                if contract_deadline is None:
+                    contract_deadline = time.time() + 3.5
+                elif time.time() > contract_deadline:
+                    break   # 보유계약이 없거나 못 읽음 → 현재까지로 확정(0건 고객일 수 있음)
+            got = matched
+            if got:
+                break
+            _return_to_list(page)
+            page.wait_for_timeout(700)
+        if got:
+            _merge_detail_into_record(rec, got)
+            done += 1
+            if logger:
+                logger.info(f"[상세] {key[0]} 완료 (보유계약 {len(got.get('contracts') or [])}건) {done}/{total_targets}")
+        elif logger:
+            logger.info(f"[상세] {key[0]} 진입 실패 — 건너뜀(다음 실행에서 재시도).")
+        if progress_cb:
+            try:
+                progress_cb(done, total_targets, f"상세 {key[0]}")
+            except Exception:
+                pass
+        _return_to_list(page)
+        page.wait_for_timeout(600)
+    if logger:
+        logger.info(f"[상세] 상세 수집 완료: {done}건 병합.")
+    return done
+
+
 def _scrape_dom_grid_once(page):
     """프레임들에서 한 번의 스크롤-수확 패스. (header, rows, scrolled) 또는 None."""
     frames = []
@@ -619,10 +1040,14 @@ def _detach_crawl_filelog(logger, fh):
 
 def crawl_customers(cdp_url="http://localhost:9222", logger=None,
                     progress_cb=None, stop_cb=None, dump_path=None,
-                    wait_secs=40, contact_excel_paths=None):
+                    wait_secs=40, contact_excel_paths=None,
+                    collect_detail=False, detail_limit=None, skip_detail_keys=None):
     """KB 보장분석 고객 데이터를 수집해 정규화 dict 리스트로 반환.
 
     progress_cb(done, total, msg) / stop_cb()->bool / dump_path: 원본 덤프 경로.
+    collect_detail: True 면 각 고객을 더블클릭해 가입현황 상세(담보별 보장/계약현황/
+      보유계약/보장요약)까지 수집(느림·모두펼치기 ON). skip_detail_keys: 이미 상세
+      수집한 (name,birth6) 집합(증분). detail_limit: 이번 실행 상세 상한.
     """
     from playwright.sync_api import sync_playwright
 
@@ -735,6 +1160,18 @@ def crawl_customers(cdp_url="http://localhost:9222", logger=None,
             results.append(rec)
             prog(i + 1, total, f"{name} 처리")
         log(f"[수집] 정규화 완료: 유효 {len(results)}건 / 전체 {total}건.")
+
+        # 상세(가입현황) 수집 — 옵트인. 각 고객 더블클릭→상세탭→모두펼치기 ON→읽기→닫기.
+        if collect_detail and results and not stopped():
+            log("[상세] 가입현황 상세 수집 시작(느림). 목록 화면을 그대로 두세요.")
+            try:
+                n = _collect_details(page, results, logger=logger,
+                                     progress_cb=progress_cb, stop_cb=stopped,
+                                     detail_limit=detail_limit,
+                                     skip_keys=skip_detail_keys)
+                log(f"[상세] 총 {n}명 상세 병합 완료.")
+            except Exception as de:
+                log(f"[상세] 상세 수집 중 오류(목록 데이터는 정상 반환): {de}")
 
     # 전화번호 매칭(선택): 동의서 진행 엑셀(들)에서 (이름+생년월일6) → 전화번호 채움
     if contact_excel_paths:

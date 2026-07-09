@@ -532,7 +532,7 @@ class CustomerCrawlWorker(QtCore.QThread):
     finished_signal = QtCore.pyqtSignal(bool, str, int)  # success, msg, saved_count
 
     def __init__(self, cdp_url, tenant_id, device_id, supabase_client, dump_path,
-                 contact_excel_paths=None):
+                 contact_excel_paths=None, collect_detail=False, detail_limit=None):
         super().__init__()
         self.cdp_url = cdp_url
         self.tenant_id = tenant_id
@@ -540,7 +540,30 @@ class CustomerCrawlWorker(QtCore.QThread):
         self.supabase = supabase_client
         self.dump_path = dump_path
         self.contact_excel_paths = contact_excel_paths or []
+        self.collect_detail = collect_detail
+        self.detail_limit = detail_limit
         self.stop_requested = False
+
+    def _fetch_detail_done_keys(self, logger):
+        """이미 상세수집된 고객의 (이름, 생년월일6) 집합 — 증분(이어받기)용.
+        raw.detail_collected=true 인 레코드만. 실패 시 빈 집합(무해)."""
+        keys = set()
+        try:
+            res = (self.supabase.table("customer_records")
+                   .select("customer_name,birth,raw")
+                   .eq("tenant_id", self.tenant_id)
+                   .limit(20000).execute())
+            for r in (res.data or []):
+                raw = r.get("raw") or {}
+                if isinstance(raw, dict) and raw.get("detail_collected"):
+                    nm = (r.get("customer_name") or "").strip()
+                    bt = re.sub(r"[^0-9]", "", str(r.get("birth") or ""))[:6]
+                    if nm:
+                        keys.add((nm, bt))
+        except Exception as e:
+            if logger:
+                logger.info(f"[상세] 기수집 키 조회 생략(무해): {e}")
+        return keys
 
     def run(self):
         logger = logging.getLogger("kkandori_crawl")
@@ -551,6 +574,11 @@ class CustomerCrawlWorker(QtCore.QThread):
         saved = 0
         try:
             from solting_auto import kb_crawler
+            skip_keys = None
+            if self.collect_detail:
+                skip_keys = self._fetch_detail_done_keys(logger)
+                if skip_keys:
+                    logger.info(f"[상세] 이미 상세수집된 {len(skip_keys)}명은 건너뜁니다(이어받기).")
             records = kb_crawler.crawl_customers(
                 cdp_url=self.cdp_url,
                 logger=logger,
@@ -558,6 +586,9 @@ class CustomerCrawlWorker(QtCore.QThread):
                 stop_cb=lambda: self.stop_requested,
                 dump_path=self.dump_path,
                 contact_excel_paths=self.contact_excel_paths,
+                collect_detail=self.collect_detail,
+                detail_limit=self.detail_limit,
+                skip_detail_keys=skip_keys,
             )
 
             self.rows_signal.emit(records or [])
@@ -1896,6 +1927,30 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         contact_row.addWidget(self.btn_clear_contacts, 1)
         layout.addLayout(contact_row)
 
+        # 상세정보 수집 옵션(옵트인) — 각 고객 더블클릭→가입현황→모두펼치기까지 수집
+        detail_box = QtWidgets.QHBoxLayout()
+        self.check_collect_detail = QtWidgets.QCheckBox("🔎 상세정보까지 수집 (담보별 보장·계약현황·보유계약)")
+        self.check_collect_detail.setChecked(False)
+        self.check_collect_detail.setToolTip(
+            "각 고객을 자동 더블클릭해 '가입현황' 상세(담보별 보장금액·계약현황·보유계약리스트·미가입/부족/충분)까지 수집합니다.\n"
+            "고객당 3~5초로 느립니다(예: 200명 약 15~20분). 수집 중 KB 화면을 만지지 마세요.\n"
+            "이미 상세수집된 고객은 자동으로 건너뜁니다(재실행=이어받기).")
+        self.check_collect_detail.setStyleSheet("color: #e2e8f0; font-size: 9pt;")
+        detail_box.addWidget(self.check_collect_detail, 3)
+        detail_box.addWidget(QtWidgets.QLabel("이번 실행 상한:"), 0)
+        self.spin_detail_limit = QtWidgets.QSpinBox()
+        self.spin_detail_limit.setRange(10, 1000)
+        self.spin_detail_limit.setValue(300)
+        self.spin_detail_limit.setSuffix(" 명")
+        self.spin_detail_limit.setToolTip("한 세션에서 상세수집할 최대 인원(KB 세션 누적한계 방어). 넘으면 다음 실행에서 이어받기.")
+        detail_box.addWidget(self.spin_detail_limit, 1)
+        layout.addLayout(detail_box)
+
+        detail_hint = QtWidgets.QLabel("※ 상세수집 시엔 '고객 목록' 화면을 띄운 상태로 두세요(자동으로 하나씩 열고 닫습니다).")
+        detail_hint.setStyleSheet("color: #64748b; font-size: 8pt;")
+        detail_hint.setWordWrap(True)
+        layout.addWidget(detail_hint)
+
         # 버튼 줄
         btn_row = QtWidgets.QHBoxLayout()
         self.btn_crawl_start = QtWidgets.QPushButton("▶️ 고객DB 수집 시작")
@@ -1955,6 +2010,8 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         self.crawl_table.setRowCount(0)
         self.crawl_progress.setValue(0)
 
+        collect_detail = self.check_collect_detail.isChecked()
+        detail_limit = self.spin_detail_limit.value() if collect_detail else None
         self.customer_crawl_worker = CustomerCrawlWorker(
             "http://localhost:9222",
             self.tenant["id"],
@@ -1962,6 +2019,8 @@ class KkandoriAgent(QtWidgets.QMainWindow):
             self.supabase,
             dump_path,
             list(self.crawl_contact_paths),
+            collect_detail=collect_detail,
+            detail_limit=detail_limit,
         )
         self.customer_crawl_worker.log_signal.connect(self._crawl_log)
         self.customer_crawl_worker.progress_signal.connect(self._crawl_progress)

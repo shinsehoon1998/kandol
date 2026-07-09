@@ -3,6 +3,14 @@
 import { useState, useEffect, useMemo } from 'react';
 import { supabase } from '@/lib/supabase';
 
+// 상세수집 여부 — 에이전트가 raw.detail_collected=true 로 표식, 없으면 상세 JSONB 유무로 판단
+function hasDetail(c: any): boolean {
+  if (c?.raw?.detail_collected) return true;
+  const ct = c?.raw?.contracts;
+  if (Array.isArray(ct) && ct.length > 0) return true;
+  return !!(c?.coverage_detail || c?.contract_status || c?.coverage_summary);
+}
+
 export default function CustomersPage() {
   const [profile, setProfile] = useState<any>(null);
   const [customers, setCustomers] = useState<any[]>([]);
@@ -14,6 +22,7 @@ export default function CustomersPage() {
   const [regFilter, setRegFilter] = useState<'all' | 'registered' | 'unregistered'>('all');
   const [phoneFilter, setPhoneFilter] = useState<'all' | 'has' | 'none'>('all');
   const [premiumFilter, setPremiumFilter] = useState<'all' | 'has' | 'none'>('all');
+  const [detailFilter, setDetailFilter] = useState<'all' | 'has' | 'none'>('all');
   const [sending, setSending] = useState(false);
 
   // 페이지 분할
@@ -85,12 +94,18 @@ export default function CustomersPage() {
       const hasPremium = c.monthly_premium != null && Number(c.monthly_premium) > 0;
       if (premiumFilter === 'has' && !hasPremium) return false;
       if (premiumFilter === 'none' && hasPremium) return false;
+      const hasDet = hasDetail(c);
+      if (detailFilter === 'has' && !hasDet) return false;
+      if (detailFilter === 'none' && hasDet) return false;
       return true;
     });
-  }, [customers, search, regFilter, phoneFilter, premiumFilter]);
+  }, [customers, search, regFilter, phoneFilter, premiumFilter, detailFilter]);
+
+  // 상세수집 인원(통계 배너용)
+  const detailCount = useMemo(() => customers.filter(hasDetail).length, [customers]);
 
   // 필터/검색/페이지크기 변경 시 1페이지로 리셋
-  useEffect(() => { setPage(1); }, [search, regFilter, phoneFilter, premiumFilter, pageSize]);
+  useEffect(() => { setPage(1); }, [search, regFilter, phoneFilter, premiumFilter, detailFilter, pageSize]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const curPage = Math.min(page, totalPages);
@@ -145,6 +160,12 @@ export default function CustomersPage() {
     }
   }
 
+  // 보유계약(상세) 추출 — raw.contracts 에 저장(마이그레이션 없음)
+  function getContracts(c: any): any[] {
+    const arr = c?.raw?.contracts;
+    return Array.isArray(arr) ? arr : [];
+  }
+
   function fmtWon(v: any) {
     if (v === null || v === undefined || v === '') return '-';
     const n = Number(v);
@@ -185,12 +206,32 @@ export default function CustomersPage() {
             <option value="has">보험료 있음</option>
             <option value="none">보험료 없음</option>
           </select>
+          <select value={detailFilter} onChange={(e) => setDetailFilter(e.target.value as any)}
+            className="px-2 py-2 rounded-lg bg-slate-900 border border-slate-700 text-sm text-slate-200">
+            <option value="all">상세: 전체</option>
+            <option value="has">상세수집 완료</option>
+            <option value="none">상세 미수집</option>
+          </select>
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="고객명 / 생년월일 / 전화번호 검색"
             className="px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500 w-56"
           />
+        </div>
+      </div>
+
+      {/* 상세수집 진척 배너 */}
+      <div className="flex items-center gap-4 rounded-xl bg-slate-900 border border-slate-800 px-4 py-3 text-sm flex-wrap">
+        <span className="text-slate-300">전체 <span className="font-bold text-white">{customers.length.toLocaleString()}</span>명</span>
+        <span className="text-slate-500">·</span>
+        <span className="text-slate-300">상세수집 <span className="font-bold text-emerald-400">{detailCount.toLocaleString()}</span>명
+          <span className="text-slate-500 ml-1">({customers.length ? Math.round((detailCount / customers.length) * 100) : 0}%)</span>
+        </span>
+        <span className="text-slate-500">·</span>
+        <span className="text-slate-400">미수집 {(customers.length - detailCount).toLocaleString()}명</span>
+        <div className="flex-1 min-w-[120px] h-2 bg-slate-800 rounded-full overflow-hidden">
+          <div className="h-full bg-emerald-500" style={{ width: `${customers.length ? (detailCount / customers.length) * 100 : 0}%` }} />
         </div>
       </div>
 
@@ -231,6 +272,7 @@ export default function CustomersPage() {
                   <th className="py-3 px-4">고객명</th>
                   <th className="py-3 px-4">생년월일</th>
                   <th className="py-3 px-4">전화번호</th>
+                  <th className="py-3 px-4">상세수집</th>
                   <th className="py-3 px-4">등록완료</th>
                   <th className="py-3 px-4">나이</th>
                   <th className="py-3 px-4">성별</th>
@@ -252,6 +294,15 @@ export default function CustomersPage() {
                     <td className="py-4 px-4 font-bold text-slate-200">{c.customer_name}</td>
                     <td className="py-4 px-4 text-slate-300">{c.birth || '-'}</td>
                     <td className="py-4 px-4 font-mono text-slate-300">{c.phone || '-'}</td>
+                    <td className="py-4 px-4">
+                      {hasDetail(c) ? (
+                        <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                          완료{getContracts(c).length ? ` · 계약${getContracts(c).length}` : ''}
+                        </span>
+                      ) : (
+                        <span className="text-slate-600 text-xs">목록만</span>
+                      )}
+                    </td>
                     <td className="py-4 px-4">
                       {c.registered_at ? (
                         <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-green-500/10 text-green-400 border border-green-500/20"
@@ -400,60 +451,162 @@ function CustomerDetailModal({
   fmtWon: (v: any) => string;
 }) {
   const c = customer;
-  const hasDetail =
+  const contracts: any[] = Array.isArray(c?.raw?.contracts) ? c.raw.contracts : [];
+  const cover = c.coverage_detail;
+  const coverRows: any[] = Array.isArray(cover?.rows) ? cover.rows
+    : (Array.isArray(cover) ? cover : []);
+  const coverHeader: string[] = Array.isArray(cover?.header) ? cover.header : [];
+  const summary = c.coverage_summary || {};
+  const detailCollected =
+    c?.raw?.detail_collected || contracts.length > 0 ||
     c.contract_status || c.coverage_summary || c.coverage_detail;
 
+  const contractSum = contracts.reduce(
+    (a, x) => a + (parseInt(String(x?.monthly || '').replace(/[^0-9]/g, '')) || 0), 0);
+
+  const tabs: { key: string; label: string }[] = [
+    { key: 'sum', label: '요약' },
+    { key: 'pol', label: `보유계약${contracts.length ? ` ${contracts.length}` : ''}` },
+    { key: 'cov', label: `전체보장현황${coverRows.length ? ` ${coverRows.length}` : ''}` },
+    { key: 'con', label: '계약현황' },
+    { key: 'raw', label: '원본' },
+  ];
+  const [tab, setTab] = useState('sum');
+
+  const barTotal = (Number(summary.미가입) || 0) + (Number(summary.부족) || 0) + (Number(summary.충분) || 0);
+
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
-      onClick={onClose}
-    >
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4" onClick={onClose}>
       <div
         className="relative max-w-4xl w-full max-h-[85vh] overflow-y-auto bg-slate-900 rounded-2xl border border-slate-800 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex justify-between items-center px-6 py-4 border-b border-slate-800 sticky top-0 bg-slate-900 z-10">
-          <div>
-            <span className="text-lg font-black text-white">{c.customer_name}</span>
-            <span className="ml-3 text-sm text-slate-400">
-              {c.birth} · {c.gender || '-'} · {c.age ?? '-'}세
-              {c.phone ? ` · 📞 ${c.phone}` : ''}
-            </span>
+        <div className="px-6 py-4 border-b border-slate-800 sticky top-0 bg-slate-900 z-10">
+          <div className="flex justify-between items-start">
+            <div>
+              <span className="text-lg font-black text-white">{c.customer_name}</span>
+              {detailCollected && (
+                <span className="ml-2 px-2 py-0.5 rounded text-[11px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">상세수집</span>
+              )}
+              <span className="ml-3 text-sm text-slate-400">
+                {c.birth} · {c.gender || '-'} · {c.age ?? '-'}세{c.phone ? ` · 📞 ${c.phone}` : ''}
+              </span>
+            </div>
+            <button onClick={onClose} className="text-slate-400 hover:text-white text-xl font-bold">✕</button>
           </div>
-          <button onClick={onClose} className="text-slate-400 hover:text-white text-xl font-bold">
-            ✕
-          </button>
+
+          {/* 요약 지표 */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-4">
+            <Summary label="월보험료" value={fmtWon(c.monthly_premium)} />
+            <Summary label="보유계약" value={(contracts.length || c.policy_count || '-') + '건'} />
+            <Summary label="보장 충분" value={(summary.충분 ?? '-') + '개'} />
+            <Summary label="동의종료일" value={c.consent_end_date || '-'} />
+          </div>
+
+          {/* 탭바 */}
+          <div className="flex gap-1 mt-4 -mb-4">
+            {tabs.map((t) => (
+              <button key={t.key} onClick={() => setTab(t.key)}
+                className={`px-3 py-2 text-sm border-b-2 transition-colors ${tab === t.key ? 'text-white border-blue-500' : 'text-slate-400 border-transparent hover:text-slate-200'}`}>
+                {t.label}
+              </button>
+            ))}
+          </div>
         </div>
 
-        <div className="p-6 space-y-6">
-          {/* 요약 */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <Summary label="월보험료" value={fmtWon(c.monthly_premium)} />
-            <Summary label="가입건수" value={(c.policy_count ?? '-') + '건'} />
-            <Summary label="동의종료일" value={c.consent_end_date || '-'} />
-            <Summary label="분석일자" value={c.analysis_date || '-'} />
-          </div>
-
-          <JsonBlock title="📑 계약현황" value={c.contract_status} />
-          <JsonBlock title="🛡️ 보장현황 (미가입/부족/충분)" value={c.coverage_summary} />
-          <JsonBlock title="💰 가입현황 상세 (담보별 금액)" value={c.coverage_detail} />
-
-          {!hasDetail && (
-            <div className="text-center py-6 text-slate-500 text-sm border border-dashed border-slate-800 rounded-lg">
-              상세 데이터(계약/보장/가입현황)가 수집되지 않았습니다.
+        <div className="p-6">
+          {!detailCollected && (
+            <div className="text-center py-8 text-slate-500 text-sm border border-dashed border-slate-800 rounded-lg">
+              상세 데이터가 아직 수집되지 않았습니다. 깐돌이 에이전트 「고객DB 수집」에서 <span className="text-slate-300">‘상세정보까지 수집’</span>을 켜고 실행하세요.
             </div>
           )}
 
-          {/* 원본 */}
-          {c.raw && (
-            <details className="text-xs">
-              <summary className="cursor-pointer text-slate-500 hover:text-slate-300">
-                원본 데이터(raw) 보기
-              </summary>
-              <pre className="mt-2 p-3 bg-slate-950 border border-slate-800 rounded-lg overflow-x-auto text-slate-400">
-                {JSON.stringify(c.raw, null, 2)}
-              </pre>
-            </details>
+          {detailCollected && tab === 'sum' && (
+            <div className="space-y-3">
+              <div className="text-sm text-slate-400">보장현황 (담보 {barTotal || coverRows.length}개 기준)</div>
+              {barTotal > 0 ? (
+                <>
+                  <div className="flex h-7 rounded-lg overflow-hidden text-xs font-bold">
+                    <div className="flex items-center justify-center bg-red-400/80 text-red-950" style={{ flex: Number(summary.미가입) || 0 }}>미가입 {summary.미가입}</div>
+                    <div className="flex items-center justify-center bg-amber-400/80 text-amber-950" style={{ flex: Number(summary.부족) || 0 }}>부족 {summary.부족}</div>
+                    <div className="flex items-center justify-center bg-emerald-400/80 text-emerald-950" style={{ flex: Number(summary.충분) || 0 }}>충분 {summary.충분}</div>
+                  </div>
+                  <div className="text-xs text-slate-500">미가입·부족({(Number(summary.미가입) || 0) + (Number(summary.부족) || 0)}개)이 많을수록 추가 가입 여지가 큽니다.</div>
+                </>
+              ) : (
+                <JsonBlock title="보장현황 요약" value={summary} />
+              )}
+            </div>
+          )}
+
+          {detailCollected && tab === 'pol' && (
+            contracts.length ? (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-sm">
+                  <thead>
+                    <tr className="border-b border-slate-700 text-xs font-bold text-slate-400">
+                      <th className="py-2 px-3">상품명</th>
+                      <th className="py-2 px-3">보험기간</th>
+                      <th className="py-2 px-3">납입조건</th>
+                      <th className="py-2 px-3 text-right">월납</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800 text-slate-300">
+                    {contracts.map((x, i) => (
+                      <tr key={i}>
+                        <td className="py-2 px-3 text-slate-200">{x.product || '-'}</td>
+                        <td className="py-2 px-3 text-xs whitespace-nowrap">{x.period || '-'}</td>
+                        <td className="py-2 px-3 text-xs">{x.cond || '-'}</td>
+                        <td className="py-2 px-3 text-right whitespace-nowrap">{x.monthly ? x.monthly + '원' : '-'}</td>
+                      </tr>
+                    ))}
+                    <tr className="border-t border-slate-600 font-bold text-slate-200">
+                      <td className="py-2 px-3" colSpan={3}>합계 (월보험료 {fmtWon(c.monthly_premium)})</td>
+                      <td className="py-2 px-3 text-right">{contractSum.toLocaleString()}원</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="text-slate-500 text-sm py-6 text-center">보유계약 데이터가 없습니다.</div>
+            )
+          )}
+
+          {detailCollected && tab === 'cov' && (
+            coverRows.length ? (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-sm">
+                  <thead>
+                    <tr className="border-b border-slate-700 text-xs font-bold text-slate-400">
+                      {(coverHeader.length ? coverHeader : Object.keys(coverRows[0] || {})).map((h) => (
+                        <th key={h} className="py-2 px-3">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800 text-slate-300">
+                    {coverRows.map((row: any, i: number) => (
+                      <tr key={i} className="hover:bg-slate-800/30">
+                        {(coverHeader.length ? coverHeader : Object.keys(row)).map((h) => (
+                          <td key={h} className="py-2 px-3">{row[h] !== undefined && row[h] !== '' ? String(row[h]) : '-'}</td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="text-slate-500 text-sm py-6 text-center">담보별 보장 데이터가 없습니다.</div>
+            )
+          )}
+
+          {detailCollected && tab === 'con' && (
+            <JsonBlock title="📑 계약현황 (정상/실효해지)" value={c.contract_status} />
+          )}
+
+          {tab === 'raw' && c.raw && (
+            <pre className="p-3 bg-slate-950 border border-slate-800 rounded-lg overflow-x-auto text-slate-400 text-xs">
+              {JSON.stringify(c.raw, null, 2)}
+            </pre>
           )}
         </div>
       </div>
