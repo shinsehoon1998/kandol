@@ -1934,6 +1934,17 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         contact_row.addWidget(self.btn_clear_contacts, 1)
         layout.addLayout(contact_row)
 
+        # 선택한 엑셀을 '지금 바로' 서버 기존 고객과 비교·매칭해 전화·주소만 갱신(크롤링 불필요)
+        apply_row = QtWidgets.QHBoxLayout()
+        self.btn_apply_contacts = QtWidgets.QPushButton("📤 선택 엑셀 → 서버 고객 전화·주소 즉시 매칭")
+        self.btn_apply_contacts.setStyleSheet("background-color: #0d9488; color: white; border-radius: 6px; padding: 7px; font-weight: bold;")
+        self.btn_apply_contacts.setToolTip(
+            "KB 수집 없이, 선택한 엑셀의 (이름+생년월일)로 서버 고객DB를 찾아 전화번호·주소만 갱신합니다.\n"
+            "서버에 이미 있는 고객만 매칭되어 갱신되며(신규는 만들지 않음), 매칭 건수를 알려줍니다.")
+        self.btn_apply_contacts.clicked.connect(self.apply_contacts_to_server)
+        apply_row.addWidget(self.btn_apply_contacts)
+        layout.addLayout(apply_row)
+
         # 상세정보 수집 옵션(옵트인) — 각 고객 더블클릭→가입현황→모두펼치기까지 수집
         detail_box = QtWidgets.QHBoxLayout()
         self.check_collect_detail = QtWidgets.QCheckBox("🔎 상세정보까지 수집 (담보별 보장·계약현황·보유계약)")
@@ -2047,6 +2058,68 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         self.crawl_contact_paths = []
         self.lbl_contacts.setText("선택된 엑셀 없음 (전화번호 매칭 안 함)")
         self.lbl_contacts.setStyleSheet("color: #94a3b8; font-size: 9pt;")
+
+    def apply_contacts_to_server(self):
+        """선택한 엑셀을 크롤링 없이 '지금 바로' 서버 기존 고객과 (이름+생년월일) 매칭해
+        전화번호·주소만 갱신한다. 신규 레코드는 만들지 않음(= 비교 매칭)."""
+        if not (self.supabase and self.tenant and self.device):
+            QtWidgets.QMessageBox.warning(self, "인증 필요", "먼저 기기 인증(로그인)을 완료해 주세요.")
+            return
+        if not self.crawl_contact_paths:
+            QtWidgets.QMessageBox.information(
+                self, "엑셀 선택 필요",
+                "먼저 위의 '전화번호·주소 매칭 엑셀 선택'으로 엑셀을 고른 뒤 눌러주세요.\n"
+                "(엑셀 헤더에 이름·전화번호가 있어야 하며, 주소·생년월일이 있으면 함께 매칭됩니다)")
+            return
+        self.btn_apply_contacts.setEnabled(False)
+        self.btn_apply_contacts.setText("서버 매칭 중...")
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+        try:
+            from solting_auto import kb_crawler
+            contacts = kb_crawler._read_excel_contacts(list(self.crawl_contact_paths))
+            recs = []
+            for c in contacts:
+                nm = (c.get("customer_name") or "").strip()
+                if not nm:
+                    continue
+                r = {"customer_name": nm, "birth": c.get("birth", "")}
+                if c.get("phone"):
+                    r["phone"] = c["phone"]
+                if c.get("address"):
+                    r["address"] = c["address"]
+                recs.append(r)
+            if not recs:
+                QtWidgets.QMessageBox.warning(
+                    self, "매칭 대상 없음",
+                    "엑셀에서 (이름+전화번호) 행을 찾지 못했습니다. 헤더를 확인해 주세요.")
+                return
+            matched, total = 0, 0
+            for i in range(0, len(recs), 200):
+                chunk = recs[i:i + 200]
+                res = self.supabase.rpc("apply_contacts_via_device", {
+                    "p_tenant_id": self.tenant["id"],
+                    "p_device_id": self.device["id"],
+                    "p_records": chunk,
+                }).execute()
+                d = res.data or {}
+                if isinstance(d, dict):
+                    matched += int(d.get("matched", 0) or 0)
+                    total += int(d.get("total", 0) or 0)
+            self._crawl_log(f"[매칭] 엑셀 {total}건 중 서버 고객 {matched}건 매칭 → 전화·주소 갱신.")
+            QtWidgets.QMessageBox.information(
+                self, "서버 매칭 완료",
+                f"엑셀 {total}건을 서버 고객DB와 비교했습니다.\n\n"
+                f"✅ 매칭·갱신: {matched}건 (전화·주소 반영)\n"
+                f"➖ 미매칭: {total - matched}건 (서버에 없는 고객 — 갱신 안 함)\n\n"
+                f"어드민 고객DB에서 전화번호·주소가 채워졌는지 확인하세요.")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(
+                self, "서버 매칭 실패",
+                f"오류: {e}\n\n(RPC apply_contacts_via_device 마이그레이션이 적용됐는지 확인해 주세요.)")
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+            self.btn_apply_contacts.setEnabled(True)
+            self.btn_apply_contacts.setText("📤 선택 엑셀 → 서버 고객 전화·주소 즉시 매칭")
 
     def stop_customer_crawl(self):
         if self.customer_crawl_worker and self.customer_crawl_worker.isRunning():
