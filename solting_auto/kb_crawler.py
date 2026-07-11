@@ -530,23 +530,20 @@ _DETAIL_KEY_SUFFIX = "grd_bcvrInscoBcsfcGuarntInfo"
 # '모두펼치기' 토글을 ON으로 만든다(멱등: 이미 펼쳐져 있으면 건드리지 않음).
 # 토글 라벨 span(class ch_cmmn_swctxt, text '모두펼치기')을 클릭. 펼침 여부는
 # 담보 아래 개별상품(보험사명) 행이 렌더되는지로 판단하기 어려워, 상태 텍스트로 근사.
+# '모두펼치기' 토글을 무조건 클릭(토글)한다. 호출부(_read_open_detail)에서 accinbox
+# 렌더 여부를 확인하며 '펼쳐질 때까지'만 클릭하므로, ON/OFF 상태와 무관하게 수렴한다.
 _EXPAND_ALL_JS = r"""() => {
-  const spans=[...document.querySelectorAll('span,a,label,button')]
-    .filter(e=>((e.innerText||'').trim()==='모두펼치기'));
-  if(!spans.length) return 'no-toggle';
-  // 이미 ON인지: 인근 스위치 input(checked) 또는 aria-pressed 확인
-  const s=spans[0];
-  let on=false;
-  const box=s.closest('label,div,span')||s;
-  const chk=box.querySelector('input[type=checkbox]');
-  if(chk) on=!!chk.checked;
-  if(!on){
-    try{ s.click(); }catch(e){}
-    try{ s.dispatchEvent(new MouseEvent('click',{bubbles:true})); }catch(e){}
-    return 'clicked';
-  }
-  return 'already-on';
+  const t=[...document.querySelectorAll('span,a,label,button')]
+    .filter(e=>e.offsetParent && (e.innerText||'').trim()==='모두펼치기')[0];
+  if(!t) return 'no-toggle';
+  try{ t.click(); }catch(e){}
+  try{ t.dispatchEvent(new MouseEvent('click',{bubbles:true})); }catch(e){}
+  return 'clicked';
 }"""
+
+# 담보별 개별상품(accinbox)이 렌더됐는지 확인하는 JS.
+_ACCIN_READY_JS = ("()=>[...document.querySelectorAll('.ch_pc_cm_accinbox .ch_pc_dl_listbox')]"
+                   ".some(e=>(e.innerText||'').trim().length>5)")
 
 # 상세의 '가입현황' 서브탭을 활성화한다(보유계약리스트·전체보장현황은 이 탭에서만 렌더).
 # 사용자 플로우: 더블클릭 → '가입현황' 클릭 → '모두펼치기' ON.
@@ -599,6 +596,21 @@ _DETAIL_JS = r"""() => {
   const cvrDetail = readGrid('grd_cvrDetailInfo');
   const cont = readGrid('grd_contInfo');
 
+  // 모두펼치기 ON 시 담보별 개별상품(어느 보험사·상품이 그 담보를 보장하는지).
+  // 구조(라이브 검증): .ch_pc_dl_listbox 의 leaf = [담보명, 담보합계, {보험사,상품,회사담보,금액}*N].
+  let byProduct = [];
+  document.querySelectorAll('.ch_pc_cm_accinbox .ch_pc_dl_listbox').forEach(it => {
+    const lv = [...it.querySelectorAll('*')]
+      .filter(e => e.children.length === 0 && (e.innerText || '').trim())
+      .map(e => (e.innerText || '').trim());
+    if (lv.length < 6) return;
+    const dambo = lv[0];
+    for (let i = 2; i + 4 <= lv.length; i += 4) {
+      byProduct.push({담보: dambo, 보험사: lv[i], 상품: lv[i + 1],
+                      회사담보: lv[i + 2], 가입금액: lv[i + 3]});
+    }
+  });
+
   // 보장현황 요약: 미가입/부족/충분
   const summary = {
     미가입: num(/미가입[\s\S]{0,6}?([0-9]+)\s*건/),
@@ -645,7 +657,8 @@ _DETAIL_JS = r"""() => {
     coverage_summary: summary,
     contract_status: cont ? cont.rows : null,
     coverage_detail: cover ? {header:cover.header, rows:cover.rows,
-                              detail: cvrDetail?cvrDetail.rows:null} : null,
+                              detail: cvrDetail?cvrDetail.rows:null,
+                              byProduct: byProduct} : null,
     contracts,
   };
 }"""
@@ -715,9 +728,17 @@ def _read_open_detail(page, logger=None, expand=True):
     except Exception:
         pass
     if expand:
+        # 담보별 개별상품(accinbox)이 렌더될 때까지 '모두펼치기'를 토글한다.
+        # (커버리지 없는 고객은 끝내 안 뜰 수 있어 시도 횟수를 제한.)
         try:
-            fr.evaluate(_EXPAND_ALL_JS)
-            page.wait_for_timeout(450)   # 펼침 렌더 대기(이벤트 펌프)
+            for _attempt in range(3):
+                if fr.evaluate(_ACCIN_READY_JS):
+                    break
+                fr.evaluate(_EXPAND_ALL_JS)
+                for _ in range(7):
+                    page.wait_for_timeout(250)
+                    if fr.evaluate(_ACCIN_READY_JS):
+                        break
         except Exception:
             pass
     try:
@@ -816,9 +837,28 @@ def _grid_rowcount(frame, gid):
         return -1
 
 
-def _load_full_list(page, frame, gid, logger=None, max_iters=80):
+def _load_full_list(page, frame, gid, logger=None, max_iters=120):
     """지연로딩(스크롤 시 서버에서 계속 추가) 목록을 바닥까지 반복 스크롤해 전체 행을
-    로드한다(getRowCount 가 연속으로 안 늘 때까지). 로드 후 맨 위로 복귀."""
+    로드한다. 화면의 '{N}명' 표기를 목표치로 삼고, 실제 마우스 휠 + 스크롤바 이동을
+    함께 써서 KB의 추가 로딩을 유도한다. getRowCount 가 목표 도달 또는 연속으로 안 늘
+    때까지 반복. 로드 후 맨 위로 복귀."""
+    # 목표 인원(있으면): 사이드바 '최근 보장분석 고객 N명' 등
+    target = 0
+    try:
+        m = frame.evaluate("()=>{const t=(document.body.innerText||'').match(/([0-9]{1,5})\\s*명/g)||[];"
+                           "let mx=0;for(const s of t){const v=parseInt(s);if(v>mx)mx=v;}return mx;}")
+        target = int(m or 0)
+    except Exception:
+        target = 0
+    # 그리드 중앙 페이지 좌표(실제 휠용)
+    try:
+        box = frame.evaluate("(g)=>{const el=document.getElementById(g);const r=el.getBoundingClientRect();"
+                             "return {x:r.x+r.width/2,y:r.y+r.height/2};}", gid)
+        off = _iframe_chain_offset(frame)
+        wx, wy = box["x"] + off["x"], box["y"] + off["y"]
+    except Exception:
+        wx = wy = None
+
     last = _grid_rowcount(frame, gid)
     idle = 0
     for _ in range(max_iters):
@@ -828,14 +868,22 @@ def _load_full_list(page, frame, gid, logger=None, max_iters=80):
                 "if(sy){sy.scrollTop=sy.scrollHeight;sy.dispatchEvent(new Event('scroll',{bubbles:true}));}}", gid)
         except Exception:
             pass
-        page.wait_for_timeout(700)   # 서버 추가 로딩 대기
+        if wx is not None:
+            try:
+                page.mouse.move(wx, wy)
+                page.mouse.wheel(0, 2400)
+            except Exception:
+                pass
+        page.wait_for_timeout(750)   # 서버 추가 로딩 대기
         n = _grid_rowcount(frame, gid)
         if n > last:
             last = n
             idle = 0
         else:
             idle += 1
-        if idle >= 6:                # 6회 연속 안 늘면 수렴
+        if target and last >= target:   # 표기 인원 도달 → 완료
+            break
+        if idle >= 8:                   # 8회 연속 안 늘면 수렴
             break
     try:
         frame.evaluate(
@@ -845,7 +893,8 @@ def _load_full_list(page, frame, gid, logger=None, max_iters=80):
         pass
     page.wait_for_timeout(400)
     if logger:
-        logger.info(f"[상세] 목록 전체 로드 완료: {last}명(지연로딩 스크롤).")
+        tgt = f" / 표기 {target}명" if target else ""
+        logger.info(f"[상세] 목록 전체 로드: {last}명{tgt}(지연로딩 스크롤).")
     return last
 
 

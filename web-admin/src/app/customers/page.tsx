@@ -456,6 +456,13 @@ function CustomerDetailModal({
   const coverRows: any[] = Array.isArray(cover?.rows) ? cover.rows
     : (Array.isArray(cover) ? cover : []);
   const coverHeader: string[] = Array.isArray(cover?.header) ? cover.header : [];
+  // 담보별 가입상품(모두펼치기 수집): [{담보, 보험사, 상품, 회사담보, 가입금액}]
+  const byProduct: any[] = Array.isArray(cover?.byProduct) ? cover.byProduct : [];
+  const byDambo: Record<string, any[]> = {};
+  for (const x of byProduct) {
+    const k = x?.담보 || '-';
+    (byDambo[k] = byDambo[k] || []).push(x);
+  }
   const summary = c.coverage_summary || {};
   const detailCollected =
     c?.raw?.detail_collected || contracts.length > 0 ||
@@ -593,6 +600,32 @@ function CustomerDetailModal({
                     ))}
                   </tbody>
                 </table>
+
+                {byProduct.length > 0 && (
+                  <div className="mt-6">
+                    <div className="text-sm font-bold text-slate-300 mb-2">
+                      담보별 가입상품 <span className="text-slate-500 font-normal">({byProduct.length}건 · 어느 보험사·상품이 해당 담보를 보장하는지)</span>
+                    </div>
+                    <div className="space-y-2">
+                      {Object.entries(byDambo).map(([dambo, items]) => (
+                        <div key={dambo} className="rounded-lg border border-slate-800 overflow-hidden">
+                          <div className="px-3 py-1.5 bg-slate-800/50 text-xs font-bold text-slate-200">{dambo}</div>
+                          <table className="w-full text-left border-collapse text-xs">
+                            <tbody className="divide-y divide-slate-800/70 text-slate-300">
+                              {items.map((x: any, i: number) => (
+                                <tr key={i}>
+                                  <td className="py-1.5 px-3 w-24 text-slate-400">{x.보험사 || '-'}</td>
+                                  <td className="py-1.5 px-3">{x.상품 || '-'}</td>
+                                  <td className="py-1.5 px-3 text-right whitespace-nowrap text-slate-200">{x.가입금액 || '-'}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             ) : (
               <div className="text-slate-500 text-sm py-6 text-center">담보별 보장 데이터가 없습니다.</div>
