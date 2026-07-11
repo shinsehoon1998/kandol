@@ -498,6 +498,9 @@ function CustomerDetailModal({
               <span className="ml-3 text-sm text-slate-400">
                 {c.birth} · {c.gender || '-'} · {c.age ?? '-'}세{c.phone ? ` · 📞 ${c.phone}` : ''}
               </span>
+              {c.address && (
+                <div className="text-sm text-slate-400 mt-1">📍 {c.address}</div>
+              )}
             </div>
             <button onClick={onClose} className="text-slate-400 hover:text-white text-xl font-bold">✕</button>
           </div>

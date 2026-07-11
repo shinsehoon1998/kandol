@@ -12,7 +12,8 @@ class Record:
     jumin: str
     name: str
     phone: str
-    raw: dict            # 원본 셀 값
+    address: str = ""    # 주소지(고객DB 저장용, 동의서 출력엔 미사용)
+    raw: dict = None     # 원본 셀 값
 
 
 def read_records(xlsx_path: str, columns: dict) -> list:
@@ -57,6 +58,7 @@ def read_records(xlsx_path: str, columns: dict) -> list:
                 jumin=_cell(row, idx["jumin"]),
                 name=_cell(row, idx["name"]),
                 phone=_cell(row, idx["phone"]),
+                address=(_cell(row, idx["address"]) if "address" in idx else ""),
                 raw=raw,
             )
         )

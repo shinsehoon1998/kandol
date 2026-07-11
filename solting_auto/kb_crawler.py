@@ -170,6 +170,7 @@ def _normalize_row(row):
         "customer_name": (str(name).strip() if name else ""),
         "birth": (birth or ""),
         "phone": None,
+        "address": None,
         "age": age,
         "gender": gender,
         "analysis_date": analysis,
@@ -1345,17 +1346,26 @@ def crawl_customers(cdp_url="http://localhost:9222", logger=None,
             except Exception as de:
                 log(f"[상세] 상세 수집 중 오류(목록 데이터는 정상 반환): {de}")
 
-    # 전화번호 매칭(선택): 동의서 진행 엑셀(들)에서 (이름+생년월일6) → 전화번호 채움
+    # 전화번호/주소 매칭(선택): 동의서 진행 엑셀(들)에서 (이름+생년월일6) → 전화·주소 채움
     if contact_excel_paths:
         try:
             contacts = _read_excel_contacts(contact_excel_paths, logger)
             pmap = build_phone_map(contacts)
+            amap = {}
+            for c in contacts:
+                nm, bt, ad = c.get("customer_name"), c.get("birth") or "", c.get("address")
+                if nm and ad:
+                    amap[(nm, bt)] = ad
+                    amap.setdefault((nm, ""), ad)
             matched = 0
             for rec in results:
                 ph = pmap.get((rec["customer_name"], rec["birth"])) or pmap.get((rec["customer_name"], ""))
                 if ph:
                     rec["phone"] = ph
                     matched += 1
+                ad = amap.get((rec["customer_name"], rec["birth"])) or amap.get((rec["customer_name"], ""))
+                if ad:
+                    rec["address"] = ad
             log(f"[수집] 전화번호 매칭: {matched}/{len(results)}건 (엑셀 연락처 {len(contacts)}건)")
         except Exception as ph_err:
             log(f"[수집] 전화번호 매칭 실패(무시): {ph_err}")
@@ -1368,11 +1378,12 @@ def crawl_customers(cdp_url="http://localhost:9222", logger=None,
 _XL_NAME_HINTS = ["성명", "이름", "고객명", "고객", "name"]
 _XL_JUMIN_HINTS = ["주민", "생년", "주민번호", "주민등록"]
 _XL_PHONE_HINTS = ["휴대폰", "휴대전화", "핸드폰", "전화", "연락처", "phone", "mobile", "hp"]
+_XL_ADDR_HINTS = ["주소", "주소지", "거주지", "address", "addr"]
 
 
 def _read_excel_contacts(paths, logger=None):
-    """동의서 진행 엑셀(들)에서 (성명, 생년월일6, 전화번호) 추출.
-    반환 list[{customer_name, birth, phone}]. 헤더는 키워드로 유연 탐지."""
+    """동의서 진행 엑셀(들)에서 (성명, 생년월일6, 전화번호, 주소지) 추출.
+    반환 list[{customer_name, birth, phone, address}]. 헤더는 키워드로 유연 탐지."""
     import openpyxl
     if isinstance(paths, str):
         paths = [paths]
@@ -1398,6 +1409,8 @@ def _read_excel_contacts(paths, logger=None):
                             tmp["jumin"] = i
                         if "phone" not in tmp and any(k in h for k in _XL_PHONE_HINTS):
                             tmp["phone"] = i
+                        if "address" not in tmp and any(k in h for k in _XL_ADDR_HINTS):
+                            tmp["address"] = i
                     if "name" in tmp and "phone" in tmp:
                         hi, idx = ri, tmp
                         break
@@ -1407,7 +1420,7 @@ def _read_excel_contacts(paths, logger=None):
                     def g(k):
                         j = idx.get(k)
                         return row[j] if (j is not None and j < len(row)) else None
-                    name, phone, jumin = g("name"), g("phone"), g("jumin")
+                    name, phone, jumin, addr = g("name"), g("phone"), g("jumin"), g("address")
                     if not name or not phone:
                         continue
                     name = str(name).strip()
@@ -1417,8 +1430,10 @@ def _read_excel_contacts(paths, logger=None):
                         if len(d) >= 6:
                             birth = d[:6]
                     phone = re.sub(r"\s+", "", str(phone)).strip()
+                    address = str(addr).strip() if addr is not None else ""
                     if name and phone:
-                        out.append({"customer_name": name, "birth": birth, "phone": phone})
+                        out.append({"customer_name": name, "birth": birth,
+                                    "phone": phone, "address": address})
         finally:
             try:
                 wb.close()

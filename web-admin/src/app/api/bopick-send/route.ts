@@ -42,6 +42,7 @@ export async function POST(request: Request) {
     customers: customers.map((c) => ({
       customer_name: c.customer_name ?? null,
       phone: c.phone ?? null,
+      address: c.address ?? null,
       birth: c.birth ?? null,
       age: c.age ?? null,
       gender: c.gender ?? null,

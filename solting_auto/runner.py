@@ -47,7 +47,9 @@ def process_file(xlsx_path: str, config: dict, logger, dry_run: bool = False,
     stop_check_cb() - 중단 요청 여부를 반환하는 콜백 함수(선택).
     """
     run = config["run"]
-    columns = config["columns"]
+    # 주소는 필수 컬럼(고객DB 저장용). 배포된 config.yaml에 없어도 강제로 요구한다.
+    columns = dict(config["columns"])
+    columns.setdefault("address", "주소")
     fmt = config.get("format", {})
     out_folder = run.get("output_folder", "./output")
     Path(out_folder).mkdir(parents=True, exist_ok=True)
@@ -108,7 +110,7 @@ def process_file(xlsx_path: str, config: dict, logger, dry_run: bool = False,
                 if not valid:
                     ts = _now()
                     r = RowResult(
-                        row_no=rec.row_no, jumin=rec.jumin, name=rec.name, phone=rec.phone,
+                        row_no=rec.row_no, jumin=rec.jumin, name=rec.name, phone=rec.phone, address=getattr(rec, "address", ""),
                         status=SKIP, timestamp=ts, reason=reason
                     )
                     for st in stages:
@@ -130,7 +132,7 @@ def process_file(xlsx_path: str, config: dict, logger, dry_run: bool = False,
                 if is_dup:
                     ts = _now()
                     r = RowResult(
-                        row_no=rec.row_no, jumin=rec.jumin, name=rec.name, phone=rec.phone,
+                        row_no=rec.row_no, jumin=rec.jumin, name=rec.name, phone=rec.phone, address=getattr(rec, "address", ""),
                         status=SKIP, timestamp=ts, reason=reason
                     )
                     for st in stages:
@@ -299,7 +301,7 @@ def _process_row(rec, stages, engines, dedups, run, use_checksum, shot_folder, l
     stamped_dir_override: 지정 시 스탬프 결과를 이 폴더에 저장(50명 단위 폴더링용)."""
     ts = _now()
     r = RowResult(
-        row_no=rec.row_no, jumin=rec.jumin, name=rec.name, phone=rec.phone,
+        row_no=rec.row_no, jumin=rec.jumin, name=rec.name, phone=rec.phone, address=getattr(rec, "address", ""),
         status=SKIP, timestamp=ts,
     )
 
@@ -486,7 +488,7 @@ def _process_chunk(chunk, stages, engines, dedups, run, shot_folder, logger, dry
     for rec in chunk:
         ts = _now()
         chunk_results[rec.row_no] = RowResult(
-            row_no=rec.row_no, jumin=rec.jumin, name=rec.name, phone=rec.phone,
+            row_no=rec.row_no, jumin=rec.jumin, name=rec.name, phone=rec.phone, address=getattr(rec, "address", ""),
             status=SKIP, timestamp=ts
         )
         

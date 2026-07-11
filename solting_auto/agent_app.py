@@ -974,6 +974,13 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         file_layout.addWidget(btn_browse)
         step3_layout.addLayout(file_layout)
 
+        excel_hint = QtWidgets.QLabel(
+            "※ 엑셀 필수 컬럼: 주민번호 · 이름 · 전화번호 · <b>주소</b> "
+            "(주소 컬럼이 없으면 실행되지 않습니다 — 고객DB에 주소까지 함께 저장됩니다)")
+        excel_hint.setStyleSheet("color:#f59e0b; font-size:8pt;")
+        excel_hint.setWordWrap(True)
+        step3_layout.addWidget(excel_hint)
+
         # Form fields
         folders_form = QtWidgets.QFormLayout()
         
@@ -1914,7 +1921,7 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         # 전화번호 매칭용 엑셀 선택 (선택 사항)
         self.crawl_contact_paths = []
         contact_row = QtWidgets.QHBoxLayout()
-        self.btn_pick_contacts = QtWidgets.QPushButton("📎 전화번호 매칭 엑셀 선택(선택)")
+        self.btn_pick_contacts = QtWidgets.QPushButton("📎 전화번호·주소 매칭 엑셀 선택(선택)")
         self.btn_pick_contacts.setStyleSheet("background-color: #334155; color: #e2e8f0; border-radius: 6px; padding: 6px;")
         self.btn_pick_contacts.clicked.connect(self.pick_contact_excels)
         self.lbl_contacts = QtWidgets.QLabel("선택된 엑셀 없음 (전화번호 매칭 안 함)")
@@ -2546,9 +2553,12 @@ class KkandoriAgent(QtWidgets.QMainWindow):
                     digits = _re.sub(r"[^0-9]", "", str(getattr(r, "jumin", "") or ""))
                     birth = digits[:6] if len(digits) >= 6 else ""
                     phone = str(getattr(r, "phone", "") or "").strip()
+                    address = str(getattr(r, "address", "") or "").strip()
                     rec = {"customer_name": name, "birth": birth}
                     if phone:
                         rec["phone"] = phone
+                    if address:
+                        rec["address"] = address
                     if getattr(r, "status", "") == SUCCESS:
                         rec["registered"] = True   # 등록완료
                     recs.append(rec)
@@ -2556,8 +2566,11 @@ class KkandoriAgent(QtWidgets.QMainWindow):
                 from solting_auto import kb_crawler
                 for c in kb_crawler._read_excel_contacts([xlsx_path]):
                     if c.get("customer_name"):
-                        recs.append({"customer_name": c["customer_name"], "birth": c.get("birth", ""),
-                                     "phone": c.get("phone")})
+                        rec = {"customer_name": c["customer_name"], "birth": c.get("birth", ""),
+                               "phone": c.get("phone")}
+                        if c.get("address"):
+                            rec["address"] = c["address"]
+                        recs.append(rec)
             recs = [r for r in recs if r.get("customer_name")]
             if not recs:
                 return

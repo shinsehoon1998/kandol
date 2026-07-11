@@ -28,6 +28,7 @@ class RowResult:
     name: str
     phone: str
     status: str                 # 전체 상태(성공/실패/Skip)
+    address: str = ""           # 주소지(고객DB 저장용)
     reason: str = ""            # 전체 사유(검증/중복 Skip 등)
     timestamp: str = ""
     # 단계별 결과
