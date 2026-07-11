@@ -670,6 +670,18 @@ def _find_detail_frame(page):
     return None
 
 
+def _detail_customer_name(page):
+    """상세 화면의 고객명('{이름}고객님')만 값싸게 읽는다(로드 대기용, 탭 활성화 없이)."""
+    fr = _find_detail_frame(page)
+    if not fr:
+        return None
+    try:
+        return fr.evaluate("()=>{const m=(document.body.innerText||'').match(/([가-힣]{2,4})\\s*고객님/);"
+                           "return m?m[1]:null;}")
+    except Exception:
+        return None
+
+
 def _read_open_detail(page, logger=None, expand=True):
     """현재 열린 상세 화면을 읽어 구조화 dict 반환(없으면 None).
     expand=True 면 '모두펼치기'를 ON으로 만든 뒤 읽는다."""
@@ -797,9 +809,50 @@ def _list_rows_via_model(frame, gid):
         return []
 
 
-def _dblclick_customer_by_name(page, frame, gid, name):
-    """목록을 여러 스크롤 위치로 훑으며 custNm==name 행을 찾아 실제 마우스 더블클릭.
-    (WebSquare 가상 그리드: 스크롤 좌표가 압축돼 인덱스 계산이 부정확하므로 이름으로 탐색.)"""
+def _grid_rowcount(frame, gid):
+    try:
+        return frame.evaluate("(g)=>{try{return $p.getComponentById(g).getRowCount()}catch(e){return -1}}", gid)
+    except Exception:
+        return -1
+
+
+def _load_full_list(page, frame, gid, logger=None, max_iters=80):
+    """지연로딩(스크롤 시 서버에서 계속 추가) 목록을 바닥까지 반복 스크롤해 전체 행을
+    로드한다(getRowCount 가 연속으로 안 늘 때까지). 로드 후 맨 위로 복귀."""
+    last = _grid_rowcount(frame, gid)
+    idle = 0
+    for _ in range(max_iters):
+        try:
+            frame.evaluate(
+                "(g)=>{const sy=document.getElementById(g).querySelector('[class*=w2grid_scrollY]');"
+                "if(sy){sy.scrollTop=sy.scrollHeight;sy.dispatchEvent(new Event('scroll',{bubbles:true}));}}", gid)
+        except Exception:
+            pass
+        page.wait_for_timeout(700)   # 서버 추가 로딩 대기
+        n = _grid_rowcount(frame, gid)
+        if n > last:
+            last = n
+            idle = 0
+        else:
+            idle += 1
+        if idle >= 6:                # 6회 연속 안 늘면 수렴
+            break
+    try:
+        frame.evaluate(
+            "(g)=>{const sy=document.getElementById(g).querySelector('[class*=w2grid_scrollY]');"
+            "if(sy){sy.scrollTop=0;sy.dispatchEvent(new Event('scroll',{bubbles:true}));}}", gid)
+    except Exception:
+        pass
+    page.wait_for_timeout(400)
+    if logger:
+        logger.info(f"[상세] 목록 전체 로드 완료: {last}명(지연로딩 스크롤).")
+    return last
+
+
+def _dblclick_customer_by_name(page, frame, gid, name, idx=None, total=None):
+    """custNm==name 행을 찾아 실제 마우스 더블클릭. 대형 목록(수백명)에서는 5구간으론
+    중간 고객을 놓치므로, 인덱스 비례 스크롤(라이브 검증: 정확)을 우선하고 촘촘한
+    구간 스크롤로 보완한다."""
     try:
         mx = frame.evaluate(
             "(g)=>{const sy=document.getElementById(g).querySelector('[class*=w2grid_scrollY]');"
@@ -807,7 +860,18 @@ def _dblclick_customer_by_name(page, frame, gid, name):
     except Exception:
         mx = 0
     off = _iframe_chain_offset(frame)
-    for frac in (0, 0.25, 0.5, 0.75, 1.0):
+    # 후보 스크롤 위치: 인덱스 비례(±약간) 우선 + 촘촘한 전역 격자(0~1, 0.05 간격)
+    fracs = []
+    if idx is not None and total and total > 1:
+        base = idx / (total - 1)
+        fracs += [base, max(0.0, base - 0.03), min(1.0, base + 0.03)]
+    fracs += [i / 20.0 for i in range(21)]
+    seen = set()
+    for frac in fracs:
+        key = round(frac, 3)
+        if key in seen:
+            continue
+        seen.add(key)
         try:
             frame.evaluate(
                 "([g,st])=>{const sy=document.getElementById(g).querySelector('[class*=w2grid_scrollY]');"
@@ -815,6 +879,19 @@ def _dblclick_customer_by_name(page, frame, gid, name):
                 [gid, int(mx * frac)])
         except Exception:
             pass
+        page.wait_for_timeout(300)
+        # 이름이 보이면 그 행을 화면 중앙으로 스크롤(가장자리 잘림 → 더블클릭 미스 방지) 후 클릭
+        try:
+            found = frame.evaluate(
+                "([g,nm])=>{const root=document.getElementById(g);"
+                "for(const tr of [...root.querySelectorAll('tr')].filter(r=>r.offsetParent)){"
+                "const td=tr.querySelector('td[col_id=custNm]');"
+                "if(td&&td.innerText.trim()===nm){td.scrollIntoView({block:'center'});return true;}}"
+                "return false;}", [gid, name])
+        except Exception:
+            found = False
+        if not found:
+            continue
         page.wait_for_timeout(350)
         try:
             r = frame.evaluate(
@@ -822,6 +899,7 @@ def _dblclick_customer_by_name(page, frame, gid, name):
                 "for(const tr of [...root.querySelectorAll('tr')].filter(r=>r.offsetParent)){"
                 "const td=tr.querySelector('td[col_id=custNm]');"
                 "if(td&&td.innerText.trim()===nm){const rc=td.getBoundingClientRect();"
+                "if(rc.height<6)return null;"
                 "return{x:rc.x+rc.width/2,y:rc.y+rc.height/2};}}return null;}", [gid, name])
         except Exception:
             r = None
@@ -854,11 +932,15 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
         if logger:
             logger.info("[상세] 보장분석 목록이 화면에 보이지 않습니다. '보장분석' 고객목록 화면을 띄워주세요.")
         return 0
+    # 지연로딩 목록을 바닥까지 스크롤해 전체 로드(스크롤 시 서버에서 계속 추가됨).
+    _load_full_list(page, fr, gid, logger)
     list_rows = _list_rows_via_model(fr, gid)
     if not list_rows:
         if logger:
             logger.info("[상세] 목록 데이터모델을 읽지 못했습니다.")
         return 0
+    list_total = len(list_rows)
+    idx_of = {(_norm_key(lr["name"], lr["birth"])): i for i, lr in enumerate(list_rows)}
 
     by_key = {}
     for rec in results:
@@ -893,41 +975,47 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
                 fr, gid = _visible_list_frame_grid(page)
             if not fr:
                 break
-            if not _dblclick_customer_by_name(page, fr, gid, lr["name"]):
+            if not _dblclick_customer_by_name(page, fr, gid, lr["name"],
+                                              idx=idx_of.get(key), total=list_total):
                 if logger and attempt == 0:
                     logger.info(f"[상세] {key[0]} 목록에서 행을 못 찾음 — 재시도.")
                 _return_to_list(page)
                 page.wait_for_timeout(600)
                 continue
-            # 진입 직후 상세가 '전체요약'으로 로딩되는 동안 대기(라이브 검증: settle 전 가입현황
-            # 클릭은 씹혀 보유계약이 렌더되지 않음). 상세 탭은 1개를 재사용하므로 더블클릭 후
-            # 이전 고객이 잠시 보일 수 있어, '대상 고객으로 갱신될 때까지' 폴링한다(불일치=대기).
-            page.wait_for_timeout(2000)
-            deadline = time.time() + 22
-            matched = None
-            while time.time() < deadline:
-                det = _read_open_detail(page, logger, expand=True)
-                ins = det.get("insured") if det else None
-                if not ins or not (ins == key[0] or (key[1] and det.get("insured_birth", "")[:6] == key[1])):
-                    # 아직 이전 고객이 보이거나 로딩 중 → 조금 더 대기
-                    page.wait_for_timeout(600)
-                    continue
-                matched = det
-                prem = re.sub(r"[^0-9]", "", str(det.get("monthly_premium") or ""))
-                if det.get("contracts"):
-                    break   # 보유계약 확보 → 확정
-                if not prem or prem == "0":
-                    break   # 월보험료 없음 → 계약 0건이 정상
-                # 월보험료가 있는데 보유계약 0 → 아직 가입현황 렌더 안 됨, 계속 대기
+            # (1) 대상 고객으로 상세가 뜰 때까지 '값싼 이름확인'만 폴링(탭 재사용이라 이전 고객이
+            #     잠시 보일 수 있음). 무거운 읽기를 반복하지 않아 빠르다(최대 12초).
+            page.wait_for_timeout(1500)
+            loaded = False
+            wdl = time.time() + 12
+            while time.time() < wdl:
+                nm = _detail_customer_name(page)
+                if nm and (nm == key[0] or not key[0]):
+                    loaded = True
+                    break
                 page.wait_for_timeout(500)
-            got = matched
-            # 월보험료가 있는데 끝내 보유계약 0이면 이번 시도는 불완전 → 재시도
+            if not loaded:
+                _return_to_list(page)
+                page.wait_for_timeout(700)
+                continue
+            # (2) 로드 확인됨 → 상세 읽기(가입현황 활성 포함). 월보험료가 있는데 보유계약이
+            #     아직 0이면 몇 번 더 읽어 렌더를 기다린다(최대 3회).
+            got = None
+            for _ in range(3):
+                det = _read_open_detail(page, logger, expand=True)
+                if det and det.get("insured") and (
+                        det["insured"] == key[0] or (key[1] and det.get("insured_birth", "")[:6] == key[1])):
+                    got = det
+                    prem = re.sub(r"[^0-9]", "", str(det.get("monthly_premium") or ""))
+                    if det.get("contracts") or not prem or prem == "0":
+                        break
+                page.wait_for_timeout(600)
             if got:
                 gprem = re.sub(r"[^0-9]", "", str(got.get("monthly_premium") or ""))
                 if got.get("contracts") or not gprem or gprem == "0":
-                    break
+                    break   # 완전 수집 → 확정
+            got = None       # 불완전(월보험료 있는데 계약 0) → 재시도
             _return_to_list(page)
-            page.wait_for_timeout(800)
+            page.wait_for_timeout(700)
         if got:
             _merge_detail_into_record(rec, got)
             done += 1
