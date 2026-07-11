@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import { supabase } from '@/lib/supabase';
+import { parseRegion } from '@/lib/region';
 
 // 상세수집 여부 — 에이전트가 raw.detail_collected=true 로 표식, 없으면 상세 JSONB 유무로 판단
 function hasDetail(c: any): boolean {
@@ -23,6 +24,7 @@ export default function CustomersPage() {
   const [phoneFilter, setPhoneFilter] = useState<'all' | 'has' | 'none'>('all');
   const [premiumFilter, setPremiumFilter] = useState<'all' | 'has' | 'none'>('all');
   const [detailFilter, setDetailFilter] = useState<'all' | 'has' | 'none'>('all');
+  const [regionFilter, setRegionFilter] = useState<string>('all');  // 시/도
   const [sending, setSending] = useState(false);
 
   // 페이지 분할
@@ -85,7 +87,8 @@ export default function CustomersPage() {
       if (q && !(
         (c.customer_name || '').includes(q) ||
         (c.birth || '').includes(q) ||
-        (c.phone || '').includes(q)
+        (c.phone || '').includes(q) ||
+        (c.address || '').includes(q)
       )) return false;
       if (regFilter === 'registered' && !c.registered_at) return false;
       if (regFilter === 'unregistered' && c.registered_at) return false;
@@ -97,15 +100,23 @@ export default function CustomersPage() {
       const hasDet = hasDetail(c);
       if (detailFilter === 'has' && !hasDet) return false;
       if (detailFilter === 'none' && hasDet) return false;
+      if (regionFilter !== 'all' && parseRegion(c.address).sido !== regionFilter) return false;
       return true;
     });
-  }, [customers, search, regFilter, phoneFilter, premiumFilter, detailFilter]);
+  }, [customers, search, regFilter, phoneFilter, premiumFilter, detailFilter, regionFilter]);
 
   // 상세수집 인원(통계 배너용)
   const detailCount = useMemo(() => customers.filter(hasDetail).length, [customers]);
 
+  // 데이터에 존재하는 시/도 목록(지역 필터 옵션)
+  const regionOptions = useMemo(() => {
+    const set = new Set<string>();
+    customers.forEach((c) => { const s = parseRegion(c.address).sido; if (s) set.add(s); });
+    return Array.from(set).sort();
+  }, [customers]);
+
   // 필터/검색/페이지크기 변경 시 1페이지로 리셋
-  useEffect(() => { setPage(1); }, [search, regFilter, phoneFilter, premiumFilter, detailFilter, pageSize]);
+  useEffect(() => { setPage(1); }, [search, regFilter, phoneFilter, premiumFilter, detailFilter, regionFilter, pageSize]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const curPage = Math.min(page, totalPages);
@@ -212,10 +223,15 @@ export default function CustomersPage() {
             <option value="has">상세수집 완료</option>
             <option value="none">상세 미수집</option>
           </select>
+          <select value={regionFilter} onChange={(e) => setRegionFilter(e.target.value)}
+            className="px-2 py-2 rounded-lg bg-slate-900 border border-slate-700 text-sm text-slate-200">
+            <option value="all">지역: 전체</option>
+            {regionOptions.map((r) => (<option key={r} value={r}>{r}</option>))}
+          </select>
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="고객명 / 생년월일 / 전화번호 검색"
+            placeholder="고객명 / 생년월일 / 전화번호 / 주소 검색"
             className="px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500 w-56"
           />
         </div>
@@ -272,6 +288,7 @@ export default function CustomersPage() {
                   <th className="py-3 px-4">고객명</th>
                   <th className="py-3 px-4">생년월일</th>
                   <th className="py-3 px-4">전화번호</th>
+                  <th className="py-3 px-4">주소지</th>
                   <th className="py-3 px-4">상세수집</th>
                   <th className="py-3 px-4">등록완료</th>
                   <th className="py-3 px-4">나이</th>
@@ -294,6 +311,16 @@ export default function CustomersPage() {
                     <td className="py-4 px-4 font-bold text-slate-200">{c.customer_name}</td>
                     <td className="py-4 px-4 text-slate-300">{c.birth || '-'}</td>
                     <td className="py-4 px-4 font-mono text-slate-300">{c.phone || '-'}</td>
+                    <td className="py-4 px-4 text-slate-300 max-w-[220px] truncate" title={c.address || ''}>
+                      {c.address ? (
+                        <span>
+                          {parseRegion(c.address).sido && (
+                            <span className="mr-1.5 px-1.5 py-0.5 rounded text-[10px] bg-blue-500/10 text-blue-300 border border-blue-500/20">{parseRegion(c.address).sido}</span>
+                          )}
+                          <span className="text-xs">{c.address}</span>
+                        </span>
+                      ) : '-'}
+                    </td>
                     <td className="py-4 px-4">
                       {hasDetail(c) ? (
                         <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">

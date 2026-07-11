@@ -7,6 +7,8 @@
 //   BOPICK_API_KEY  : 보픽 인입 API 키 (필수, 서버 전용 — 절대 코드/클라이언트에 하드코딩 금지)
 //   BOPICK_API_URL  : (선택) 인입 엔드포인트. 미설정 시 아래 기본값 사용.
 
+import { parseRegion } from '@/lib/region';
+
 const DEFAULT_URL = 'https://aftallfjjwzfphqeuwuc.supabase.co/functions/v1/ingest-kandori';
 
 export async function POST(request: Request) {
@@ -43,6 +45,8 @@ export async function POST(request: Request) {
       customer_name: c.customer_name ?? null,
       phone: c.phone ?? null,
       address: c.address ?? null,
+      region: parseRegion(c.address).sido || null,        // 시/도(지역 필터용)
+      region_sigungu: parseRegion(c.address).sigungu || null,  // 시/군/구
       birth: c.birth ?? null,
       age: c.age ?? null,
       gender: c.gender ?? null,
