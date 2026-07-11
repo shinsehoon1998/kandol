@@ -530,18 +530,30 @@ _DETAIL_KEY_SUFFIX = "grd_bcvrInscoBcsfcGuarntInfo"
 # '모두펼치기' 토글을 ON으로 만든다(멱등: 이미 펼쳐져 있으면 건드리지 않음).
 # 토글 라벨 span(class ch_cmmn_swctxt, text '모두펼치기')을 클릭. 펼침 여부는
 # 담보 아래 개별상품(보험사명) 행이 렌더되는지로 판단하기 어려워, 상태 텍스트로 근사.
-# '모두펼치기' 토글을 무조건 클릭(토글)한다. 호출부(_read_open_detail)에서 accinbox
-# 렌더 여부를 확인하며 '펼쳐질 때까지'만 클릭하므로, ON/OFF 상태와 무관하게 수렴한다.
+# '모두펼치기'는 chk_granTypeAll 체크박스(라이브 검증). 라벨 클릭으로 ON(checked=true,
+# 화면상 노란 토글). 이미 ON이면 건드리지 않는다. 반환: 'on'(켜짐)/'no-toggle'.
 _EXPAND_ALL_JS = r"""() => {
-  const t=[...document.querySelectorAll('span,a,label,button')]
-    .filter(e=>e.offsetParent && (e.innerText||'').trim()==='모두펼치기')[0];
-  if(!t) return 'no-toggle';
-  try{ t.click(); }catch(e){}
-  try{ t.dispatchEvent(new MouseEvent('click',{bubbles:true})); }catch(e){}
-  return 'clicked';
+  const findInp=()=>document.querySelector('input.w2checkbox_input[id*="chk_granTypeAll"]')
+    || [...document.querySelectorAll('input.w2checkbox_input')].find(i=>/granTypeAll/.test((i.id||'')+(i.name||'')));
+  let inp=findInp();
+  if(!inp){
+    const txt=[...document.querySelectorAll('*')].find(e=>e.children.length===0&&(e.innerText||'').trim()==='모두펼치기');
+    if(txt){let sc=txt;for(let i=0;i<4;i++)if(sc.parentElement)sc=sc.parentElement;inp=sc.querySelector('input.w2checkbox_input');}
+  }
+  if(!inp) return 'no-toggle';
+  if(!inp.checked){
+    const lab=inp.id?document.querySelector('label[for="'+inp.id+'"]'):null;
+    try{ (lab||inp).click(); }catch(e){}
+  }
+  return inp.checked ? 'on' : 'clicked';
 }"""
 
-# 담보별 개별상품(accinbox)이 렌더됐는지 확인하는 JS.
+# 모두펼치기(chk_granTypeAll) 가 실제로 켜졌는지(checked) 확인하는 JS.
+_EXPAND_STATE_JS = (r"""()=>{const inp=document.querySelector('input.w2checkbox_input[id*="chk_granTypeAll"]')"""
+                    r"""||[...document.querySelectorAll('input.w2checkbox_input')].find(i=>/granTypeAll/.test((i.id||'')+(i.name||'')));"""
+                    r"""return inp?!!inp.checked:null;}""")
+
+# 담보별 개별상품(accinbox)이 렌더/파싱 가능한지 확인하는 JS.
 _ACCIN_READY_JS = ("()=>[...document.querySelectorAll('.ch_pc_cm_accinbox .ch_pc_dl_listbox')]"
                    ".some(e=>(e.innerText||'').trim().length>5)")
 
@@ -728,17 +740,19 @@ def _read_open_detail(page, logger=None, expand=True):
     except Exception:
         pass
     if expand:
-        # 담보별 개별상품(accinbox)이 렌더될 때까지 '모두펼치기'를 토글한다.
-        # (커버리지 없는 고객은 끝내 안 뜰 수 있어 시도 횟수를 제한.)
+        # 모두펼치기(chk_granTypeAll)를 ON으로 켜고, 담보별 개별상품(accinbox)이 파싱
+        # 가능해질 때까지 대기. (커버리지 없는 고객은 끝내 안 뜰 수 있어 시도 제한.)
         try:
             for _attempt in range(3):
-                if fr.evaluate(_ACCIN_READY_JS):
-                    break
-                fr.evaluate(_EXPAND_ALL_JS)
+                fr.evaluate(_EXPAND_ALL_JS)      # 토글 ON(이미 ON이면 무동작)
+                ok = False
                 for _ in range(7):
                     page.wait_for_timeout(250)
                     if fr.evaluate(_ACCIN_READY_JS):
+                        ok = True
                         break
+                if ok:
+                    break
         except Exception:
             pass
     try:
