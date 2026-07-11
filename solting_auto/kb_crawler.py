@@ -677,17 +677,29 @@ def _read_open_detail(page, logger=None, expand=True):
     if not fr:
         return None
     # '가입현황' 서브탭 활성화(보유계약리스트·전체보장현황 렌더 선행조건)
+    def _cmlst_ready():
+        try:
+            return fr.evaluate("()=>[...document.querySelectorAll('[class*=cmlst_item]')]"
+                               ".some(e=>/보험기간/.test(e.innerText||''))")
+        except Exception:
+            return False
     try:
         fr.evaluate(_ACTIVATE_GAIP_JS)
-        # 가입현황 탭 전환 후 보유계약리스트(cmlst_item) 렌더까지 폴링 대기(최대 ~2초)
-        for _ in range(8):
+        for _ in range(10):                 # 렌더까지 최대 ~2.5초
             page.wait_for_timeout(250)
-            try:
-                if fr.evaluate("()=>[...document.querySelectorAll('[class*=cmlst_item]')]"
-                               ".some(e=>/보험기간/.test(e.innerText||''))"):
+            if _cmlst_ready():
+                break
+        # 아직 보유계약이 안 떴으면 탭을 강제 리로드(전체요약→가입현황) 후 재대기
+        if not _cmlst_ready():
+            fr.evaluate("()=>{const t=[...document.querySelectorAll('[class*=w2tabcontrol_li]')]"
+                        ".find(li=>li.offsetParent&&(li.innerText||'').trim()==='전체요약');"
+                        "if(t){(t.querySelector('a')||t).click();}}")
+            page.wait_for_timeout(500)
+            fr.evaluate(_ACTIVATE_GAIP_JS)
+            for _ in range(10):
+                page.wait_for_timeout(250)
+                if _cmlst_ready():
                     break
-            except Exception:
-                pass
     except Exception:
         pass
     if expand:
@@ -888,37 +900,34 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
                 page.wait_for_timeout(600)
                 continue
             # 진입 직후 상세가 '전체요약'으로 로딩되는 동안 대기(라이브 검증: settle 전 가입현황
-            # 클릭은 씹혀 보유계약이 렌더되지 않음). 상세 프레임이 뜰 때까지 최대 ~4초 대기.
-            for _ in range(16):
-                page.wait_for_timeout(250)
-                if _find_detail_frame(page):
-                    break
-            page.wait_for_timeout(1800)
-            # 상세 로딩 폴링(최대 10초) + 고객 대조(교차오염 차단).
-            # insured 가 잡혀도 보유계약리스트(DOM) 렌더는 조금 늦으므로, 매칭 후에도
-            # 보유계약이 채워질 때까지(추가 최대 3.5초) 계속 읽어 확정한다.
-            deadline = time.time() + 10
+            # 클릭은 씹혀 보유계약이 렌더되지 않음). 상세 탭은 1개를 재사용하므로 더블클릭 후
+            # 이전 고객이 잠시 보일 수 있어, '대상 고객으로 갱신될 때까지' 폴링한다(불일치=대기).
+            page.wait_for_timeout(2000)
+            deadline = time.time() + 22
             matched = None
-            contract_deadline = None
             while time.time() < deadline:
-                page.wait_for_timeout(500)
                 det = _read_open_detail(page, logger, expand=True)
-                if not (det and det.get("insured")):
+                ins = det.get("insured") if det else None
+                if not ins or not (ins == key[0] or (key[1] and det.get("insured_birth", "")[:6] == key[1])):
+                    # 아직 이전 고객이 보이거나 로딩 중 → 조금 더 대기
+                    page.wait_for_timeout(600)
                     continue
-                if not (det["insured"] == key[0] or (key[1] and det.get("insured_birth", "")[:6] == key[1])):
-                    break   # 다른 고객이 열림 → 이번 시도 실패로 간주
                 matched = det
+                prem = re.sub(r"[^0-9]", "", str(det.get("monthly_premium") or ""))
                 if det.get("contracts"):
-                    break   # 보유계약까지 확보 → 확정
-                if contract_deadline is None:
-                    contract_deadline = time.time() + 3.5
-                elif time.time() > contract_deadline:
-                    break   # 보유계약이 없거나 못 읽음 → 현재까지로 확정(0건 고객일 수 있음)
+                    break   # 보유계약 확보 → 확정
+                if not prem or prem == "0":
+                    break   # 월보험료 없음 → 계약 0건이 정상
+                # 월보험료가 있는데 보유계약 0 → 아직 가입현황 렌더 안 됨, 계속 대기
+                page.wait_for_timeout(500)
             got = matched
+            # 월보험료가 있는데 끝내 보유계약 0이면 이번 시도는 불완전 → 재시도
             if got:
-                break
+                gprem = re.sub(r"[^0-9]", "", str(got.get("monthly_premium") or ""))
+                if got.get("contracts") or not gprem or gprem == "0":
+                    break
             _return_to_list(page)
-            page.wait_for_timeout(700)
+            page.wait_for_timeout(800)
         if got:
             _merge_detail_into_record(rec, got)
             done += 1
