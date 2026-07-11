@@ -852,6 +852,35 @@ def _grid_rowcount(frame, gid):
         return -1
 
 
+def _sort_list(page, label="가설동의순", logger=None):
+    """목록 정렬 토글(예: '가설동의순')을 클릭해 그 순서로 재정렬한다. 정렬 시 목록이
+    다시 로딩되므로 호출부에서 이후 _load_full_list 로 전체를 다시 로드해야 한다.
+    (버튼 텍스트가 정확히 일치하는 리프 요소를 찾아 클릭)."""
+    for fr in list(page.frames):
+        try:
+            r = fr.evaluate(
+                "(lb)=>{"
+                "const norm=s=>(s||'').replace(/\\s+/g,'').trim();"
+                "const cands=[...document.querySelectorAll('a,button,span,div,li,td')]"
+                ".filter(e=>e.offsetParent && norm(e.innerText||e.textContent)===norm(lb));"
+                "if(!cands.length) return 'no';"
+                "cands.sort((a,b)=>a.querySelectorAll('*').length-b.querySelectorAll('*').length);"
+                "const el=cands[0];"
+                "try{(el.querySelector('a')||el).click();}catch(e){}"
+                "try{el.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true}));}catch(e){}"
+                "return 'clicked';}", label)
+            if r == "clicked":
+                page.wait_for_timeout(1600)   # 재정렬·재조회 대기
+                if logger:
+                    logger.info(f"[수집] 목록 정렬 '{label}' 클릭.")
+                return True
+        except Exception:
+            continue
+    if logger:
+        logger.info(f"[수집] 정렬 버튼 '{label}' 못 찾음 — 현재 정렬 그대로 진행.")
+    return False
+
+
 def _load_full_list(page, frame, gid, logger=None, max_iters=300, idle_stop=10):
     """지연로딩(스크롤 시 서버에서 계속 추가) 목록을 바닥까지 반복 스크롤해 '전체'를
     로드한다. 라이브 검증: 20→40→100→…→307명까지 로딩됨.
@@ -1269,6 +1298,19 @@ def crawl_customers(cdp_url="http://localhost:9222", logger=None,
             #    화면에 이미 보이는 목록은 아무것도 클릭하지 않고 그대로 수집한다
             #    (자동 클릭은 화면 상태를 바꿔 떠 있던 목록을 날릴 수 있어 위험).
             prog(0, 0, "화면의 보장분석 목록 확인 중...")
+            # 0) 캡처 '전에' 목록을 가설동의순으로 정렬 + 지연로딩 전체 로드(스크롤).
+            #    이 단계가 없으면 최초 캡처가 화면에 보이는 20건만 잡아 서버·상세수집이
+            #    20건으로 제한된다(전체 로드는 캡처보다 먼저 이뤄져야 함).
+            try:
+                fr0, gid0 = _visible_list_frame_grid(page)
+                if fr0 and gid0:
+                    _sort_list(page, "가설동의순", logger)
+                    fr0, gid0 = _visible_list_frame_grid(page)   # 정렬 후 재탐색
+                    if fr0 and gid0:
+                        n_all = _load_full_list(page, fr0, gid0, logger)
+                        prog(0, n_all, f"전체 목록 {n_all}건 로드")
+            except Exception as pre_err:
+                log(f"[수집] 목록 사전 정렬/로드 생략(무시): {pre_err}")
             try:
                 dom_arr, dom_score = _scrape_dom_grid(page, logger, stop_cb=stopped)
                 if dom_arr and dom_score >= 3:
