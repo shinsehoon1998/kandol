@@ -851,54 +851,65 @@ def _grid_rowcount(frame, gid):
         return -1
 
 
-def _load_full_list(page, frame, gid, logger=None, max_iters=120):
-    """지연로딩(스크롤 시 서버에서 계속 추가) 목록을 바닥까지 반복 스크롤해 전체 행을
-    로드한다. 화면의 '{N}명' 표기를 목표치로 삼고, 실제 마우스 휠 + 스크롤바 이동을
-    함께 써서 KB의 추가 로딩을 유도한다. getRowCount 가 목표 도달 또는 연속으로 안 늘
-    때까지 반복. 로드 후 맨 위로 복귀."""
-    # 목표 인원(있으면): 사이드바 '최근 보장분석 고객 N명' 등
-    target = 0
+def _load_full_list(page, frame, gid, logger=None, max_iters=300, idle_stop=10):
+    """지연로딩(스크롤 시 서버에서 계속 추가) 목록을 바닥까지 반복 스크롤해 '전체'를
+    로드한다. 라이브 검증: 20→40→100→…→307명까지 로딩됨.
+
+    ⚠️ 화면의 '{N}명' 표기는 '전체 수'가 아니라 '현재까지 로딩된 수'라서 목표치로
+    쓰면 안 된다(스크롤할수록 표기도 같이 커짐 → 즉시 종료 버그). 따라서 오직
+    'getRowCount 가 연속 {idle_stop}회 안 늘 때(≈8초)'만 완료로 본다.
+
+    스크롤 트리거: 스크롤바 바닥 이동 + 실제 마우스 휠(정확한 페이지 좌표)을 병행.
+    휠 좌표는 frame_element().bounding_box() 로 구해 iframe 오프셋 오류를 피한다."""
+    # 실제 마우스 휠 좌표(프레임 요소 페이지좌표 + 그리드 중앙)
+    wx = wy = None
     try:
-        m = frame.evaluate("()=>{const t=(document.body.innerText||'').match(/([0-9]{1,5})\\s*명/g)||[];"
-                           "let mx=0;for(const s of t){const v=parseInt(s);if(v>mx)mx=v;}return mx;}")
-        target = int(m or 0)
-    except Exception:
-        target = 0
-    # 그리드 중앙 페이지 좌표(실제 휠용)
-    try:
-        box = frame.evaluate("(g)=>{const el=document.getElementById(g);const r=el.getBoundingClientRect();"
-                             "return {x:r.x+r.width/2,y:r.y+r.height/2};}", gid)
-        off = _iframe_chain_offset(frame)
-        wx, wy = box["x"] + off["x"], box["y"] + off["y"]
+        fbox = frame.frame_element().bounding_box()
+        gc = frame.evaluate("(g)=>{const r=document.getElementById(g).getBoundingClientRect();"
+                            "return {x:r.x+r.width/2,y:r.y+r.height/2};}", gid)
+        if fbox and gc:
+            wx, wy = fbox["x"] + gc["x"], fbox["y"] + gc["y"]
     except Exception:
         wx = wy = None
+    if wx is None:  # 폴백: JS 오프셋
+        try:
+            gc = frame.evaluate("(g)=>{const r=document.getElementById(g).getBoundingClientRect();"
+                                "return {x:r.x+r.width/2,y:r.y+r.height/2};}", gid)
+            off = _iframe_chain_offset(frame)
+            wx, wy = gc["x"] + off["x"], gc["y"] + off["y"]
+        except Exception:
+            wx = wy = None
 
-    last = _grid_rowcount(frame, gid)
+    start = _grid_rowcount(frame, gid)
+    last = start
     idle = 0
     for _ in range(max_iters):
+        # ① 스크롤바를 바닥으로
         try:
             frame.evaluate(
                 "(g)=>{const sy=document.getElementById(g).querySelector('[class*=w2grid_scrollY]');"
                 "if(sy){sy.scrollTop=sy.scrollHeight;sy.dispatchEvent(new Event('scroll',{bubbles:true}));}}", gid)
         except Exception:
             pass
+        # ② 실제 마우스 휠(그리드 위)
         if wx is not None:
             try:
                 page.mouse.move(wx, wy)
-                page.mouse.wheel(0, 2400)
+                page.mouse.wheel(0, 3000)
             except Exception:
                 pass
-        page.wait_for_timeout(750)   # 서버 추가 로딩 대기
+        page.wait_for_timeout(800)   # 서버 추가 로딩 대기
         n = _grid_rowcount(frame, gid)
         if n > last:
+            if logger and n - last >= 20:
+                logger.info(f"[상세] 목록 로딩 중... {n}명")
             last = n
             idle = 0
         else:
             idle += 1
-        if target and last >= target:   # 표기 인원 도달 → 완료
+        if idle >= idle_stop:        # 연속 안 늘면 완료(전체 로드됨)
             break
-        if idle >= 8:                   # 8회 연속 안 늘면 수렴
-            break
+    # 맨 위로 복귀(이후 이름 스크롤 탐색 위해)
     try:
         frame.evaluate(
             "(g)=>{const sy=document.getElementById(g).querySelector('[class*=w2grid_scrollY]');"
@@ -907,8 +918,7 @@ def _load_full_list(page, frame, gid, logger=None, max_iters=120):
         pass
     page.wait_for_timeout(400)
     if logger:
-        tgt = f" / 표기 {target}명" if target else ""
-        logger.info(f"[상세] 목록 전체 로드: {last}명{tgt}(지연로딩 스크롤).")
+        logger.info(f"[상세] 목록 전체 로드 완료: {start}명 → {last}명(지연로딩 끝까지 스크롤).")
     return last
 
 
@@ -980,7 +990,7 @@ def _norm_key(name, birth):
 
 
 def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
-                     detail_limit=None, skip_keys=None, batch_cap=300):
+                     detail_limit=None, skip_keys=None, batch_cap=1000):
     """목록에서 각 고객을 더블클릭해 상세를 수집, results 각 레코드에 병합.
     라이브 검증 플로우: (보장분석 메인 탭 복귀) → 이름매칭 더블클릭 → 상세 폴링·대조 →
     모두펼치기 ON 읽기 → 복귀 → 다음.
@@ -1009,7 +1019,9 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
     for rec in results:
         by_key.setdefault(_norm_key(rec["customer_name"], rec["birth"]), rec)
 
-    cap = min(batch_cap, detail_limit or batch_cap)
+    # 이번 실행 상한 = 사용자 설정값(스핀박스). 상세수집은 KB 서버호출이 아닌 화면읽기라
+    # 세션 누적한계와 무관 → 설정값을 그대로 상한으로 쓴다(없으면 batch_cap 안전값).
+    cap = detail_limit if detail_limit else batch_cap
     targets = [lr for lr in list_rows
                if _norm_key(lr["name"], lr["birth"])[0]
                and _norm_key(lr["name"], lr["birth"]) not in skip_keys
