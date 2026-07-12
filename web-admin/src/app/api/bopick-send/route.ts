@@ -8,6 +8,7 @@
 //   BOPICK_API_URL  : (선택) 인입 엔드포인트. 미설정 시 아래 기본값 사용.
 
 import { parseRegion } from '@/lib/region';
+import { fmtContracts, fmtContractStatus, fmtCoverageSummary, fmtByProduct } from '@/lib/bopickFormat';
 
 const DEFAULT_URL = 'https://aftallfjjwzfphqeuwuc.supabase.co/functions/v1/ingest-kandori';
 
@@ -37,7 +38,9 @@ export async function POST(request: Request) {
     return Response.json({ ok: false, error: `한 번에 최대 5,000건까지 전송 가능합니다(요청 ${customers.length}건). 나눠서 보내주세요.` }, { status: 400 });
   }
 
-  // 보픽 스펙 형식으로 정리 — 모든 컬럼 보존(부가정보는 보픽이 metadata로 저장)
+  // 보픽 스펙 형식으로 정리.
+  // ⚠️ 상세수집 데이터(계약현황·보장상세 등)를 중첩 JSON 그대로 보내면 보픽 화면이
+  //    '[object Object]' 로 표시되므로, 사람이 읽기 좋은 '텍스트'로 변환해 보낸다.
   const payload = {
     source: 'kandori-customer-db',
     count: customers.length,
@@ -55,12 +58,20 @@ export async function POST(request: Request) {
       consent_end_date: c.consent_end_date ?? null,
       registered_at: c.registered_at ?? null,
       analysis_date: c.analysis_date ?? null,
-      contract_status: c.contract_status ?? null,
-      coverage_summary: c.coverage_summary ?? null,
-      coverage_detail: c.coverage_detail ?? null,
       device_name: c.devices?.device_name ?? null,
       crawled_at: c.crawled_at ?? null,
-      raw: c.raw ?? null,
+      // ── 읽기 좋은 상세 요약(보픽 표시용) ──────────────────────────
+      보유계약: fmtContracts(c.raw) || null,
+      계약현황: fmtContractStatus(c.contract_status) || null,
+      보장현황: fmtCoverageSummary(c.coverage_summary) || null,
+      담보별가입상품: fmtByProduct(c.coverage_detail) || null,
+      // 원본 구조(프로그램 연동용) — 보픽이 필요 시 파싱. 표시는 위 텍스트 사용.
+      raw_detail: {
+        contract_status: c.contract_status ?? null,
+        coverage_summary: c.coverage_summary ?? null,
+        coverage_detail: c.coverage_detail ?? null,
+        contracts: c.raw?.contracts ?? null,
+      },
     })),
   };
 
