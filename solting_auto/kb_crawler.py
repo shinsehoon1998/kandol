@@ -1049,9 +1049,8 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
     for rec in results:
         by_key.setdefault(_norm_key(rec["customer_name"], rec["birth"]), rec)
 
-    # 이번 실행 상한 = 사용자 설정값(스핀박스). 상세수집은 KB 서버호출이 아닌 화면읽기라
-    # 세션 누적한계와 무관 → 설정값을 그대로 상한으로 쓴다(없으면 batch_cap 안전값).
-    cap = detail_limit if detail_limit else batch_cap
+    # 이번 실행 상한. detail_limit 이 None/0 이면 '무제한' = 목록 전체를 대상으로 한다.
+    cap = detail_limit if detail_limit else list_total
     targets = [lr for lr in list_rows
                if _norm_key(lr["name"], lr["birth"])[0]
                and _norm_key(lr["name"], lr["birth"]) not in skip_keys

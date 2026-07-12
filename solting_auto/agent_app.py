@@ -1957,11 +1957,19 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         detail_box.addWidget(self.check_collect_detail, 3)
         detail_box.addWidget(QtWidgets.QLabel("이번 실행 상한:"), 0)
         self.spin_detail_limit = QtWidgets.QSpinBox()
-        self.spin_detail_limit.setRange(10, 1000)
+        self.spin_detail_limit.setRange(10, 5000)
         self.spin_detail_limit.setValue(300)
         self.spin_detail_limit.setSuffix(" 명")
-        self.spin_detail_limit.setToolTip("한 세션에서 상세수집할 최대 인원(KB 세션 누적한계 방어). 넘으면 다음 실행에서 이어받기.")
+        self.spin_detail_limit.setToolTip("한 세션에서 상세수집할 최대 인원. 넘으면 다음 실행에서 이어받기.")
         detail_box.addWidget(self.spin_detail_limit, 1)
+        self.check_detail_unlimited = QtWidgets.QCheckBox("♾️ 무제한(전체)")
+        self.check_detail_unlimited.setToolTip(
+            "체크하면 상한 없이 목록 전체를 상세수집합니다(오래 걸림 — 고객당 ~11초).\n"
+            "중간에 끊겨도 재실행하면 이미 수집한 고객은 건너뛰고 이어받습니다.")
+        self.check_detail_unlimited.setStyleSheet("color: #e2e8f0; font-size: 9pt;")
+        self.check_detail_unlimited.toggled.connect(
+            lambda on: self.spin_detail_limit.setEnabled(not on))
+        detail_box.addWidget(self.check_detail_unlimited, 0)
         layout.addLayout(detail_box)
 
         detail_hint = QtWidgets.QLabel("※ 상세수집 시엔 '고객 목록' 화면을 띄운 상태로 두세요(자동으로 하나씩 열고 닫습니다).")
@@ -2029,7 +2037,13 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         self.crawl_progress.setValue(0)
 
         collect_detail = self.check_collect_detail.isChecked()
-        detail_limit = self.spin_detail_limit.value() if collect_detail else None
+        # 무제한 체크 시 detail_limit=None → _collect_details 가 목록 전체를 대상으로 함
+        if collect_detail and self.check_detail_unlimited.isChecked():
+            detail_limit = None
+        elif collect_detail:
+            detail_limit = self.spin_detail_limit.value()
+        else:
+            detail_limit = None
         self.customer_crawl_worker = CustomerCrawlWorker(
             "http://localhost:9222",
             self.tenant["id"],
