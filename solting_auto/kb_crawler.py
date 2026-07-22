@@ -1081,7 +1081,8 @@ def _close_kb_popups(page, logger=None, max_close=6):
 
 
 def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
-                     detail_limit=None, skip_keys=None, batch_cap=1000):
+                     detail_limit=None, skip_keys=None, batch_cap=1000,
+                     flush_cb=None, flush_every=15):
     """목록에서 각 고객을 더블클릭해 상세를 수집, results 각 레코드에 병합.
     라이브 검증 플로우: (보장분석 메인 탭 복귀) → 이름매칭 더블클릭 → 상세 폴링·대조 →
     모두펼치기 ON 읽기 → 복귀 → 다음.
@@ -1123,7 +1124,23 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
 
     done = 0
     popup_skips = {}
-    for lr in targets:
+    pending = []          # flush 대기(상세 병합 or 팝업스킵된 rec)
+
+    def _flush():
+        """모아둔 rec 들을 서버로 점진 저장. 실패해도 수집은 계속(다음 flush/최종 저장에서 재시도)."""
+        nonlocal pending
+        if flush_cb and pending:
+            try:
+                flush_cb(list(pending))
+                if logger:
+                    logger.info(f"[상세] 중간 저장: {len(pending)}건 서버 반영(누적 완료 {done}).")
+            except Exception as fe:
+                if logger:
+                    logger.info(f"[상세] 중간 저장 실패(무시): {fe}")
+        pending = []
+
+    try:
+      for lr in targets:
         if stop_cb and stop_cb():
             break
         if done >= cap:
@@ -1214,9 +1231,16 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
                 progress_cb(done, total_targets, f"상세 {key[0]}")
             except Exception:
                 pass
+        # 이번 고객이 갱신됐으면(상세 병합 or 팝업스킵 사유) flush 대기열에 넣고, 일정 수마다 저장.
+        if (got or popup_reason) and rec is not None:
+            pending.append(rec)
+            if len(pending) >= flush_every:
+                _flush()
         _close_kb_popups(page, logger)   # 다음 고객 위해 잔여 팝업 정리
         _return_to_list(page)
         page.wait_for_timeout(600)
+    finally:
+        _flush()   # 남은 대기분 저장 — 정상완료·사용자중단·오류 어느 경우든 보존
     if logger:
         logger.info(f"[상세] 상세 수집 완료: {done}건 병합.")
         if popup_skips:
@@ -1330,7 +1354,8 @@ def _detach_crawl_filelog(logger, fh):
 def crawl_customers(cdp_url="http://localhost:9222", logger=None,
                     progress_cb=None, stop_cb=None, dump_path=None,
                     wait_secs=40, contact_excel_paths=None,
-                    collect_detail=False, detail_limit=None, skip_detail_keys=None):
+                    collect_detail=False, detail_limit=None, skip_detail_keys=None,
+                    flush_cb=None):
     """KB 보장분석 고객 데이터를 수집해 정규화 dict 리스트로 반환.
 
     progress_cb(done, total, msg) / stop_cb()->bool / dump_path: 원본 덤프 경로.
@@ -1482,17 +1507,28 @@ def crawl_customers(cdp_url="http://localhost:9222", logger=None,
             prog(i + 1, total, f"{name} 처리")
         log(f"[수집] 정규화 완료: 유효 {len(results)}건 / 전체 {total}건.")
 
+        # 목록(기본정보)을 '먼저' 서버에 저장 — 상세수집이 오래 걸리거나 중도 중단돼도
+        # 최소한 전 고객 기본정보는 남는다(부분 유실 방지).
+        if flush_cb and results:
+            try:
+                flush_cb(results)
+                log(f"[수집] 목록 {len(results)}건 서버 1차 저장 완료.")
+            except Exception as fe:
+                log(f"[수집] 목록 1차 저장 실패(무시, 최종 저장에서 재시도): {fe}")
+
         # 상세(가입현황) 수집 — 옵트인. 각 고객 더블클릭→상세탭→모두펼치기 ON→읽기→닫기.
+        # flush_cb 로 '수집하는 대로' 점진 저장 → 중도 중단/크래시에도 수집분 보존.
         if collect_detail and results and not stopped():
             log("[상세] 가입현황 상세 수집 시작(느림). 목록 화면을 그대로 두세요.")
             try:
                 n = _collect_details(page, results, logger=logger,
                                      progress_cb=progress_cb, stop_cb=stopped,
                                      detail_limit=detail_limit,
-                                     skip_keys=skip_detail_keys)
+                                     skip_keys=skip_detail_keys,
+                                     flush_cb=flush_cb)
                 log(f"[상세] 총 {n}명 상세 병합 완료.")
             except Exception as de:
-                log(f"[상세] 상세 수집 중 오류(목록 데이터는 정상 반환): {de}")
+                log(f"[상세] 상세 수집 중 오류(수집분은 서버 저장됨): {de}")
 
     # 전화번호/주소 매칭(선택): 동의서 진행 엑셀(들)에서 (이름+생년월일6) → 전화·주소 채움
     if contact_excel_paths:

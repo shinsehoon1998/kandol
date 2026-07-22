@@ -589,7 +589,7 @@ class CustomerCrawlWorker(QtCore.QThread):
         handler = PyQtLogHandler(self)  # self.log_signal 로 라우팅
         handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
         logger.addHandler(handler)
-        saved = 0
+        saved_box = {"n": 0}   # 점진 저장 누적(예외 시에도 참조 가능하도록 최상단 정의)
         try:
             from solting_auto import kb_crawler
             skip_keys = None
@@ -597,6 +597,27 @@ class CustomerCrawlWorker(QtCore.QThread):
                 skip_keys = self._fetch_detail_done_keys(logger)
                 if skip_keys:
                     logger.info(f"[상세] 이미 상세수집된 {len(skip_keys)}명은 건너뜁니다(이어받기).")
+            # 점진 저장 콜백 — 수집하는 대로 서버에 upsert(100건씩). 중도 중단/크래시에도 보존.
+            def flush_cb(recs):
+                if not (recs and self.supabase and self.tenant_id and self.device_id):
+                    return 0
+                CHUNK = 100
+                n = 0
+                for i in range(0, len(recs), CHUNK):
+                    chunk = recs[i:i + CHUNK]
+                    try:
+                        res = self.supabase.rpc("upsert_customer_records_via_device", {
+                            "p_tenant_id": self.tenant_id,
+                            "p_device_id": self.device_id,
+                            "p_records": chunk,
+                        }).execute()
+                        n += (res.data if isinstance(res.data, int) else len(chunk)) or 0
+                    except Exception as up_err:
+                        logger.error(f"[수집] 서버 저장 실패(계속 진행): {up_err}")
+                saved_box["n"] += n
+                self.progress_signal.emit(0, 0, f"서버 고객DB 저장 누적 {saved_box['n']}건")
+                return n
+
             records = kb_crawler.crawl_customers(
                 cdp_url=self.cdp_url,
                 logger=logger,
@@ -607,13 +628,11 @@ class CustomerCrawlWorker(QtCore.QThread):
                 collect_detail=self.collect_detail,
                 detail_limit=self.detail_limit,
                 skip_detail_keys=skip_keys,
+                flush_cb=flush_cb,          # ← 점진 저장
             )
 
             self.rows_signal.emit(records or [])
 
-            if self.stop_requested:
-                self.finished_signal.emit(False, "사용자 중단 요청으로 수집을 멈췄습니다.", 0)
-                return
             if not records:
                 self.finished_signal.emit(
                     False,
@@ -622,31 +641,25 @@ class CustomerCrawlWorker(QtCore.QThread):
                 )
                 return
 
-            # 서버 업로드 (100건씩 일괄 upsert)
-            CHUNK = 100
-            total = len(records)
-            for i in range(0, total, CHUNK):
-                if self.stop_requested:
-                    break
-                chunk = records[i:i + CHUNK]
-                try:
-                    res = self.supabase.rpc("upsert_customer_records_via_device", {
-                        "p_tenant_id": self.tenant_id,
-                        "p_device_id": self.device_id,
-                        "p_records": chunk,
-                    }).execute()
-                    n = res.data if isinstance(res.data, int) else len(chunk)
-                    saved += (n or 0)
-                    self.progress_signal.emit(min(i + CHUNK, total), total, f"서버 고객DB 저장 {saved}건")
-                except Exception as up_err:
-                    logger.error(f"[수집] 서버 저장 실패: {up_err}")
-                    self.finished_signal.emit(False, f"서버 업로드 실패: {up_err}", saved)
-                    return
+            # flush_cb 로 이미 저장됨. 혹시 한 건도 안 올라갔으면(예외 등) 최종 안전 저장.
+            if saved_box["n"] == 0:
+                flush_cb(records)
+            saved = len(records)   # 저장된 고객 수(전 고객 기본정보 저장, 일부는 상세 포함)
+
+            if self.stop_requested:
+                self.finished_signal.emit(
+                    True,
+                    f"중단됨 — 고객 {saved}명 기본정보 + 지금까지 수집한 상세는 서버에 저장되었습니다.\n(재실행하면 이어받기 됩니다)",
+                    saved)
+                return
 
             self.finished_signal.emit(True, f"고객 {saved}건을 어드민 고객DB에 저장했습니다. 🎉", saved)
         except Exception as e:
             logger.error(f"[수집] 오류: {e}")
-            self.finished_signal.emit(False, f"수집 중 오류가 발생했습니다:\n{e}", saved)
+            _n = saved_box["n"]
+            self.finished_signal.emit(
+                False,
+                f"수집 중 오류가 발생했습니다(지금까지 저장된 분은 어드민에 남아있습니다):\n{e}", _n)
         finally:
             try:
                 logger.removeHandler(handler)
