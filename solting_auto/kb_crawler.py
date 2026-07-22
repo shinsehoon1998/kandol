@@ -1019,6 +1019,67 @@ def _norm_key(name, birth):
     return ((name or "").strip(), re.sub(r"[^0-9]", "", str(birth or ""))[:6])
 
 
+# 상세수집 흐름을 막는 KB 알림 팝업(WebSquare 모달) 감지·닫기.
+# 마케팅 미동의·조회불가 등 다양한 팝업을, '모달 조상을 가진 확인/닫기 버튼'만 눌러 닫아
+# 정상 UI 버튼 오탐을 방지한다.
+_POPUP_BTN_SELS = [
+    "input[id$='btn_confirm']", "input[id$='btn_ok']", "input[id$='btnConfirm']",
+    "input[id$='btnOk']", "input[value='확인']", "input[value='닫기']", "input[value='예']",
+    "a:has-text('확인')", "button:has-text('확인')", "button:has-text('닫기')",
+]
+_POPUP_ANCESTOR_RE = "w2window|w2modal|w2alert|w2confirm|messagebox|popup|floatingLayer|confpop"
+
+
+def _close_kb_popups(page, logger=None, max_close=6):
+    """상세수집을 막는 KB 알림 팝업(WebSquare 모달)을 감지·닫는다.
+    닫은 팝업의 사유 텍스트 리스트를 반환(없으면 빈 리스트).
+    버튼의 조상이 '모달'인 경우에만 클릭해 정상 화면 버튼 오클릭을 막는다."""
+    closed = []
+    for _ in range(max_close):
+        hit = False
+        for fr in list(page.frames):
+            for bs in _POPUP_BTN_SELS:
+                try:
+                    loc = fr.locator(bs)
+                    if loc.count() == 0:
+                        continue
+                    b = loc.first
+                    if not b.is_visible():
+                        continue
+                except Exception:
+                    continue
+                # 버튼 조상이 모달인지 확인 + 모달 텍스트(사유) 추출
+                try:
+                    info = b.evaluate(
+                        "(el, re)=>{let p=el;for(let i=0;i<10&&p;i++){p=p.parentElement;"
+                        "if(p&&new RegExp(re,'i').test(String(p.className||''))){"
+                        "return (p.innerText||'').replace(/\\s+/g,' ').trim().slice(0,140);}}return null;}",
+                        _POPUP_ANCESTOR_RE)
+                except Exception:
+                    info = None
+                if info is None:
+                    continue   # 모달 아님 → 정상 버튼일 수 있으니 건드리지 않음
+                try:
+                    b.click(force=True, timeout=1500)
+                except Exception:
+                    try:
+                        b.evaluate("e=>e.click()")
+                    except Exception:
+                        continue
+                reason = info or "(알림 팝업)"
+                closed.append(reason)
+                if logger:
+                    logger.info(f"[상세] 차단팝업 닫기: {reason[:90]}")
+                page.wait_for_timeout(400)
+                hit = True
+                break
+            if hit:
+                break
+        if not hit:
+            break
+    return closed
+
+
 def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
                      detail_limit=None, skip_keys=None, batch_cap=1000):
     """목록에서 각 고객을 더블클릭해 상세를 수집, results 각 레코드에 병합.
@@ -1061,6 +1122,7 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
         logger.info(f"[상세] 대상 {total_targets}명(전체 목록 {len(list_rows)} / 기수집 skip {len(skip_keys)}).")
 
     done = 0
+    popup_skips = {}
     for lr in targets:
         if stop_cb and stop_cb():
             break
@@ -1071,7 +1133,9 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
         key = _norm_key(lr["name"], lr["birth"])
         rec = by_key.get(key) or by_key.get((key[0], ""))
         got = None
+        popup_reason = None
         for attempt in range(2):
+            _close_kb_popups(page, logger)   # 이전 고객의 잔여 팝업 정리
             fr, gid = _visible_list_frame_grid(page)
             if not fr:
                 _return_to_list(page)
@@ -1088,15 +1152,24 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
                 continue
             # (1) 대상 고객으로 상세가 뜰 때까지 '값싼 이름확인'만 폴링(탭 재사용이라 이전 고객이
             #     잠시 보일 수 있음). 무거운 읽기를 반복하지 않아 빠르다(최대 12초).
+            #     이 사이 마케팅미동의·조회불가 등 팝업이 뜨면 즉시 닫고 이 고객은 스킵한다.
             page.wait_for_timeout(1500)
             loaded = False
             wdl = time.time() + 12
             while time.time() < wdl:
+                pops = _close_kb_popups(page, logger)
+                if pops:
+                    popup_reason = pops[0]
+                    break
                 nm = _detail_customer_name(page)
                 if nm and (nm == key[0] or not key[0]):
                     loaded = True
                     break
                 page.wait_for_timeout(500)
+            if popup_reason:
+                _return_to_list(page)
+                page.wait_for_timeout(600)
+                break   # 팝업은 재시도해도 또 뜨므로 이 고객은 스킵
             if not loaded:
                 _return_to_list(page)
                 page.wait_for_timeout(700)
@@ -1125,6 +1198,15 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
             done += 1
             if logger:
                 logger.info(f"[상세] {key[0]} 완료 (보유계약 {len(got.get('contracts') or [])}건) {done}/{total_targets}")
+        elif popup_reason:
+            # 마케팅미동의·조회불가 등 팝업으로 상세 진입 불가 → 사유 기록하고 스킵
+            if rec is not None:
+                raw = rec.get("raw") if isinstance(rec.get("raw"), dict) else {}
+                raw["detail_skip_reason"] = f"팝업: {popup_reason}"
+                rec["raw"] = raw
+            popup_skips[popup_reason] = popup_skips.get(popup_reason, 0) + 1
+            if logger:
+                logger.info(f"[상세] {key[0]} 팝업으로 스킵: {popup_reason[:60]}")
         elif logger:
             logger.info(f"[상세] {key[0]} 진입 실패 — 건너뜀(다음 실행에서 재시도).")
         if progress_cb:
@@ -1132,10 +1214,16 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
                 progress_cb(done, total_targets, f"상세 {key[0]}")
             except Exception:
                 pass
+        _close_kb_popups(page, logger)   # 다음 고객 위해 잔여 팝업 정리
         _return_to_list(page)
         page.wait_for_timeout(600)
     if logger:
         logger.info(f"[상세] 상세 수집 완료: {done}건 병합.")
+        if popup_skips:
+            summ = ", ".join(f"{k[:24]} {v}" for k, v in
+                             sorted(popup_skips.items(), key=lambda x: -x[1]))
+            total_pop = sum(popup_skips.values())
+            logger.info(f"[상세] 팝업으로 스킵 {total_pop}명 — 사유별: {summ}")
     return done
 
 
@@ -1278,15 +1366,34 @@ def crawl_customers(cdp_url="http://localhost:9222", logger=None,
             raise RuntimeError("KB 전산 페이지를 찾지 못했습니다. KB에 로그인된 디버그 브라우저가 떠 있는지 확인하세요.")
 
         cap = _Capture(logger, dump_path)
-        # 기존 페이지 + 이후 생성되는 새 창/팝업까지 응답 리스너 부착
+
+        # 네이티브 브라우저 경고창(window.alert/confirm) 자동 처리(막힘 방지 + 사유 로깅)
+        def _on_dialog(dlg):
+            try:
+                msg = (dlg.message or "").replace("\n", " ")[:100]
+                if logger:
+                    logger.info(f"[상세] 네이티브 알림 자동확인: {msg}")
+                dlg.accept()
+            except Exception:
+                try:
+                    dlg.dismiss()
+                except Exception:
+                    pass
+
+        # 기존 페이지 + 이후 생성되는 새 창/팝업까지 응답·다이얼로그 리스너 부착
         for ctx in browser.contexts:
             for pg in ctx.pages:
                 try:
                     pg.on("response", cap.on_response)
                 except Exception:
                     pass
+                try:
+                    pg.on("dialog", _on_dialog)
+                except Exception:
+                    pass
             try:
-                ctx.on("page", lambda pg: pg.on("response", cap.on_response))
+                ctx.on("page", lambda pg: (pg.on("response", cap.on_response),
+                                           pg.on("dialog", _on_dialog)))
             except Exception:
                 pass
 
