@@ -615,7 +615,8 @@ class CustomerCrawlWorker(QtCore.QThread):
                     except Exception as up_err:
                         logger.error(f"[수집] 서버 저장 실패(계속 진행): {up_err}")
                 saved_box["n"] += n
-                self.progress_signal.emit(0, 0, f"서버 고객DB 저장 누적 {saved_box['n']}건")
+                # 진행바는 상세수집 progress_cb가 관리하므로 여기선 로그만(진행바 리셋 방지)
+                logger.info(f"[수집] 서버 저장 누적 {saved_box['n']}건")
                 return n
 
             records = kb_crawler.crawl_customers(
