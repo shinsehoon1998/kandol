@@ -4,6 +4,12 @@ import { useState, useEffect, useMemo } from 'react';
 import { supabase } from '@/lib/supabase';
 import { parseRegion } from '@/lib/region';
 
+// 상세수집이 팝업(마케팅미동의·조회불가 등)으로 스킵된 사유 — 에이전트가 raw.detail_skip_reason 에 기록
+function detailSkipReason(c: any): string {
+  const r = c?.raw?.detail_skip_reason;
+  return typeof r === 'string' ? r : '';
+}
+
 // 상세수집 여부 — 에이전트가 raw.detail_collected=true 로 표식, 없으면 상세 JSONB 유무로 판단
 function hasDetail(c: any): boolean {
   if (c?.raw?.detail_collected) return true;
@@ -23,7 +29,7 @@ export default function CustomersPage() {
   const [regFilter, setRegFilter] = useState<'all' | 'registered' | 'unregistered'>('all');
   const [phoneFilter, setPhoneFilter] = useState<'all' | 'has' | 'none'>('all');
   const [premiumFilter, setPremiumFilter] = useState<'all' | 'has' | 'none'>('all');
-  const [detailFilter, setDetailFilter] = useState<'all' | 'has' | 'none'>('all');
+  const [detailFilter, setDetailFilter] = useState<'all' | 'has' | 'none' | 'skip'>('all');
   const [regionFilter, setRegionFilter] = useState<string>('all');  // 시/도
   const [sending, setSending] = useState(false);
 
@@ -100,6 +106,7 @@ export default function CustomersPage() {
       const hasDet = hasDetail(c);
       if (detailFilter === 'has' && !hasDet) return false;
       if (detailFilter === 'none' && hasDet) return false;
+      if (detailFilter === 'skip' && !detailSkipReason(c)) return false;
       if (regionFilter !== 'all' && parseRegion(c.address).sido !== regionFilter) return false;
       return true;
     });
@@ -107,6 +114,7 @@ export default function CustomersPage() {
 
   // 상세수집 인원(통계 배너용)
   const detailCount = useMemo(() => customers.filter(hasDetail).length, [customers]);
+  const skipCount = useMemo(() => customers.filter((c) => detailSkipReason(c)).length, [customers]);
 
   // 데이터에 존재하는 시/도 목록(지역 필터 옵션)
   const regionOptions = useMemo(() => {
@@ -221,6 +229,7 @@ export default function CustomersPage() {
             className="px-2 py-2 rounded-lg bg-slate-900 border border-slate-700 text-sm text-slate-200">
             <option value="all">상세: 전체</option>
             <option value="has">상세수집 완료</option>
+            <option value="skip">⚠️ 팝업 스킵</option>
             <option value="none">상세 미수집</option>
           </select>
           <select value={regionFilter} onChange={(e) => setRegionFilter(e.target.value)}
@@ -246,6 +255,12 @@ export default function CustomersPage() {
         </span>
         <span className="text-slate-500">·</span>
         <span className="text-slate-400">미수집 {(customers.length - detailCount).toLocaleString()}명</span>
+        {skipCount > 0 && (
+          <>
+            <span className="text-slate-500">·</span>
+            <span className="text-amber-400">⚠️ 팝업스킵 {skipCount.toLocaleString()}명</span>
+          </>
+        )}
         <div className="flex-1 min-w-[120px] h-2 bg-slate-800 rounded-full overflow-hidden">
           <div className="h-full bg-emerald-500" style={{ width: `${customers.length ? (detailCount / customers.length) * 100 : 0}%` }} />
         </div>
@@ -325,6 +340,11 @@ export default function CustomersPage() {
                       {hasDetail(c) ? (
                         <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
                           완료{getContracts(c).length ? ` · 계약${getContracts(c).length}` : ''}
+                        </span>
+                      ) : detailSkipReason(c) ? (
+                        <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20"
+                          title={detailSkipReason(c)}>
+                          ⚠️ {detailSkipReason(c).replace(/^팝업:\s*/, '').slice(0, 14) || '팝업 스킵'}
                         </span>
                       ) : (
                         <span className="text-slate-600 text-xs">목록만</span>
@@ -552,7 +572,13 @@ function CustomerDetailModal({
         </div>
 
         <div className="p-6">
-          {!detailCollected && (
+          {detailSkipReason(c) && (
+            <div className="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-2.5 text-sm text-amber-300">
+              ⚠️ 상세수집이 팝업으로 스킵됨 — <span className="font-semibold">{detailSkipReason(c).replace(/^팝업:\s*/, '')}</span>
+              <span className="text-amber-400/70 text-xs ml-2">(다음 수집 재실행 시 재시도됩니다)</span>
+            </div>
+          )}
+          {!detailCollected && !detailSkipReason(c) && (
             <div className="text-center py-8 text-slate-500 text-sm border border-dashed border-slate-800 rounded-lg">
               상세 데이터가 아직 수집되지 않았습니다. 깐돌이 에이전트 「고객DB 수집」에서 <span className="text-slate-300">‘상세정보까지 수집’</span>을 켜고 실행하세요.
             </div>
