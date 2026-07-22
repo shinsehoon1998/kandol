@@ -546,8 +546,27 @@ class CustomerCrawlWorker(QtCore.QThread):
 
     def _fetch_detail_done_keys(self, logger):
         """이미 상세수집된 고객의 (이름, 생년월일6) 집합 — 증분(이어받기)용.
-        raw.detail_collected=true 인 레코드만. 실패 시 빈 집합(무해)."""
+        기기 인증 RPC(get_detail_done_keys_via_device)로 조회한다. 에이전트는 유저 세션이
+        없어 customer_records 직접 SELECT 는 RLS로 0건이 나오므로 반드시 RPC를 써야 한다.
+        실패 시 빈 집합(무해 — 이 경우 전부 재수집)."""
         keys = set()
+        # 1) 기기 인증 RPC(권장) — RLS 우회(SECURITY DEFINER)
+        try:
+            res = self.supabase.rpc("get_detail_done_keys_via_device", {
+                "p_tenant_id": self.tenant_id,
+                "p_device_id": self.device_id,
+            }).execute()
+            for r in (res.data or []):
+                nm = (r.get("name") or "").strip()
+                bt = re.sub(r"[^0-9]", "", str(r.get("birth") or ""))[:6]
+                if nm:
+                    keys.add((nm, bt))
+            if keys:
+                return keys
+        except Exception as e:
+            if logger:
+                logger.info(f"[상세] 기수집 RPC 조회 실패(마이그레이션 미적용 가능): {e}")
+        # 2) 폴백: 직접 SELECT (RLS 허용 환경일 때만 유효)
         try:
             res = (self.supabase.table("customer_records")
                    .select("customer_name,birth,raw")
@@ -560,9 +579,8 @@ class CustomerCrawlWorker(QtCore.QThread):
                     bt = re.sub(r"[^0-9]", "", str(r.get("birth") or ""))[:6]
                     if nm:
                         keys.add((nm, bt))
-        except Exception as e:
-            if logger:
-                logger.info(f"[상세] 기수집 키 조회 생략(무해): {e}")
+        except Exception:
+            pass
         return keys
 
     def run(self):
