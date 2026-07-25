@@ -619,6 +619,7 @@ class CustomerCrawlWorker(QtCore.QThread):
                 logger.info(f"[수집] 서버 저장 누적 {saved_box['n']}건")
                 return n
 
+            crawl_state = {}   # 상세수집 자동중단 사유(세션만료/연속실패) 회수용
             records = kb_crawler.crawl_customers(
                 cdp_url=self.cdp_url,
                 logger=logger,
@@ -630,6 +631,7 @@ class CustomerCrawlWorker(QtCore.QThread):
                 detail_limit=self.detail_limit,
                 skip_detail_keys=skip_keys,
                 flush_cb=flush_cb,          # ← 점진 저장
+                state=crawl_state,          # ← 자동중단 사유 회수
             )
 
             self.rows_signal.emit(records or [])
@@ -654,7 +656,15 @@ class CustomerCrawlWorker(QtCore.QThread):
                     saved)
                 return
 
-            self.finished_signal.emit(True, f"고객 {saved}건을 어드민 고객DB에 저장했습니다. 🎉", saved)
+            _stop_why = crawl_state.get("detail_stop_reason")
+            if _stop_why:
+                self.finished_signal.emit(
+                    True,
+                    f"고객 {saved}건 저장 완료.\n⚠️ 상세수집이 자동 중단되었습니다: {_stop_why}\n"
+                    f"(수집분은 서버에 보존됨 — 확인/재로그인 후 다시 실행하면 이어받기 됩니다)",
+                    saved)
+            else:
+                self.finished_signal.emit(True, f"고객 {saved}건을 어드민 고객DB에 저장했습니다. 🎉", saved)
         except Exception as e:
             logger.error(f"[수집] 오류: {e}")
             _n = saved_box["n"]

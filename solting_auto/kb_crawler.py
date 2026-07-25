@@ -1080,9 +1080,46 @@ def _close_kb_popups(page, logger=None, max_close=6):
     return closed
 
 
+# 세션 만료/로그아웃 감지 — 장시간(수천 명) 실행 중 KB 세션이 끊기면
+# 전 고객을 무더기 스킵하는 대신 안전 중단해 '이어받기'로 재개하게 한다.
+# 간격은 .{0,N}(한국어 조사 '세션이 만료' 등 포함). 단, 헤더 상시 '로그아웃' 버튼
+# 오탐 방지를 위해 로그아웃은 접미사(되었/됨/처리)를 요구한다.
+_SESSION_LOST_RE = re.compile(
+    r"세션.{0,4}만료|다시.{0,3}로그인|재\s*로그인|"
+    r"로그아웃.{0,4}(되|됨|처리)|인증.{0,4}(만료|필요|실패)|"
+    r"시간.{0,4}초과|로그인.{0,4}(필요|하세요|해\s*주|하십)"
+)
+
+
+def _detect_session_lost(page):
+    """KB 세션 만료/로그아웃 정황을 '강신호'만으로 감지(정상 실행 오탐 방지).
+    보이는 비밀번호 입력칸(로그인화면 복귀) 또는 세션만료 문구가 있을 때만 True.
+    반환 (lost: bool, why: str)."""
+    try:
+        for fr in page.frames:
+            try:
+                if fr.locator("input[type='password']:visible").count() > 0:
+                    return True, "로그인 화면(비밀번호 입력칸) 감지"
+            except Exception:
+                pass
+            try:
+                txt = fr.evaluate(
+                    "() => (document.body && document.body.innerText)"
+                    " ? document.body.innerText.slice(0, 4000) : ''") or ""
+            except Exception:
+                txt = ""
+            m = _SESSION_LOST_RE.search(txt)
+            if m:
+                return True, f"세션만료/로그아웃 문구('{m.group(0)}')"
+    except Exception:
+        pass
+    return False, ""
+
+
 def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
                      detail_limit=None, skip_keys=None, batch_cap=1000,
-                     flush_cb=None, flush_every=15):
+                     flush_cb=None, flush_every=15,
+                     max_consecutive_fail=20, state=None):
     """목록에서 각 고객을 더블클릭해 상세를 수집, results 각 레코드에 병합.
     라이브 검증 플로우: (보장분석 메인 탭 복귀) → 이름매칭 더블클릭 → 상세 폴링·대조 →
     모두펼치기 ON 읽기 → 복귀 → 다음.
@@ -1125,6 +1162,8 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
     done = 0
     popup_skips = {}
     pending = []          # flush 대기(상세 병합 or 팝업스킵된 rec)
+    consecutive_fail = 0  # 연속 진입실패/스킵 수(세션만료·시스템장애 조기감지용)
+    stop_reason = None    # 자동 중단 사유(세션만료/연속실패) → state 로 상위 전달
 
     def _flush():
         """모아둔 rec 들을 서버로 점진 저장. 실패해도 수집은 계속(다음 flush/최종 저장에서 재시도)."""
@@ -1236,11 +1275,35 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
             pending.append(rec)
             if len(pending) >= flush_every:
                 _flush()
+        # 연속 실패/세션 만료 조기감지 → 무더기 스킵 대신 안전 중단(이어받기로 재개).
+        if got:
+            consecutive_fail = 0
+        else:
+            consecutive_fail += 1
+            sess_lost, why = False, ""
+            if popup_reason and _SESSION_LOST_RE.search(popup_reason or ""):
+                sess_lost, why = True, f"팝업문구('{popup_reason[:30]}')"
+            elif consecutive_fail >= 3:          # 3연속 실패부터 세션 상태 점검(비용 절감)
+                sess_lost, why = _detect_session_lost(page)
+            if sess_lost:
+                stop_reason = (f"세션 만료/로그아웃 감지({why}) — 안전 중단. "
+                               f"재로그인 후 다시 실행하면 이어받기 됩니다.")
+                if logger:
+                    logger.info(f"[상세] ⛔ {stop_reason}")
+                break
+            if consecutive_fail >= max_consecutive_fail:
+                stop_reason = (f"연속 {consecutive_fail}명 상세 진입 실패 — 자동 중단"
+                               f"(KB 세션·화면 상태 확인 필요). 수집분은 저장됨.")
+                if logger:
+                    logger.info(f"[상세] ⛔ {stop_reason}")
+                break
         _close_kb_popups(page, logger)   # 다음 고객 위해 잔여 팝업 정리
         _return_to_list(page)
         page.wait_for_timeout(600)
     finally:
         _flush()   # 남은 대기분 저장 — 정상완료·사용자중단·오류 어느 경우든 보존
+    if state is not None and stop_reason:
+        state["detail_stop_reason"] = stop_reason
     if logger:
         logger.info(f"[상세] 상세 수집 완료: {done}건 병합.")
         if popup_skips:
@@ -1355,7 +1418,7 @@ def crawl_customers(cdp_url="http://localhost:9222", logger=None,
                     progress_cb=None, stop_cb=None, dump_path=None,
                     wait_secs=40, contact_excel_paths=None,
                     collect_detail=False, detail_limit=None, skip_detail_keys=None,
-                    flush_cb=None):
+                    flush_cb=None, state=None, max_consecutive_fail=20):
     """KB 보장분석 고객 데이터를 수집해 정규화 dict 리스트로 반환.
 
     progress_cb(done, total, msg) / stop_cb()->bool / dump_path: 원본 덤프 경로.
@@ -1525,7 +1588,9 @@ def crawl_customers(cdp_url="http://localhost:9222", logger=None,
                                      progress_cb=progress_cb, stop_cb=stopped,
                                      detail_limit=detail_limit,
                                      skip_keys=skip_detail_keys,
-                                     flush_cb=flush_cb)
+                                     flush_cb=flush_cb,
+                                     max_consecutive_fail=max_consecutive_fail,
+                                     state=state)
                 log(f"[상세] 총 {n}명 상세 병합 완료.")
             except Exception as de:
                 log(f"[상세] 상세 수집 중 오류(수집분은 서버 저장됨): {de}")
