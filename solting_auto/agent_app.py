@@ -546,27 +546,38 @@ class CustomerCrawlWorker(QtCore.QThread):
 
     def _fetch_detail_done_keys(self, logger):
         """이미 상세수집된 고객의 (이름, 생년월일6) 집합 — 증분(이어받기)용.
-        기기 인증 RPC(get_detail_done_keys_via_device)로 조회한다. 에이전트는 유저 세션이
-        없어 customer_records 직접 SELECT 는 RLS로 0건이 나오므로 반드시 RPC를 써야 한다.
-        실패 시 빈 집합(무해 — 이 경우 전부 재수집)."""
+        기기 인증 RPC(get_detail_done_keys_via_device)로 조회(RLS 우회 SECURITY DEFINER).
+        에이전트는 유저 세션이 없어 직접 SELECT 는 RLS로 0건이므로 RPC가 정상이어야
+        이어받기가 동작한다. 일시적 네트워크/타임아웃에 무너지지 않도록 3회 재시도하고,
+        최종 조회 성공 여부를 self._detail_keys_ok 에 남겨 워커가 경고할 수 있게 한다."""
+        import time as _time
+        self._detail_keys_ok = False
         keys = set()
-        # 1) 기기 인증 RPC(권장) — RLS 우회(SECURITY DEFINER)
-        try:
-            res = self.supabase.rpc("get_detail_done_keys_via_device", {
-                "p_tenant_id": self.tenant_id,
-                "p_device_id": self.device_id,
-            }).execute()
-            for r in (res.data or []):
-                nm = (r.get("name") or "").strip()
-                bt = re.sub(r"[^0-9]", "", str(r.get("birth") or ""))[:6]
-                if nm:
-                    keys.add((nm, bt))
-            if keys:
+        # 1) 기기 인증 RPC(권장) — 3회 재시도(일시 실패 방어)
+        for attempt in range(3):
+            try:
+                res = self.supabase.rpc("get_detail_done_keys_via_device", {
+                    "p_tenant_id": self.tenant_id,
+                    "p_device_id": self.device_id,
+                }).execute()
+                for r in (res.data or []):
+                    nm = (r.get("name") or "").strip()
+                    bt = re.sub(r"[^0-9]", "", str(r.get("birth") or ""))[:6]
+                    if nm:
+                        keys.add((nm, bt))
+                self._detail_keys_ok = True        # 호출 성공(0건이어도 정상 = 첫 실행)
                 return keys
-        except Exception as e:
-            if logger:
-                logger.info(f"[상세] 기수집 RPC 조회 실패(마이그레이션 미적용 가능): {e}")
-        # 2) 폴백: 직접 SELECT (RLS 허용 환경일 때만 유효)
+            except Exception as e:
+                msg = str(e)
+                # PGRST202/함수없음 = 진짜 마이그레이션 미적용 → 재시도 무의미, 즉시 폴백
+                if "PGRST202" in msg or "Could not find the function" in msg:
+                    if logger:
+                        logger.info(f"[상세] 기수집 RPC 미존재(마이그레이션 미적용): {msg[:140]}")
+                    break
+                if logger:
+                    logger.info(f"[상세] 기수집 RPC 일시 실패 {attempt + 1}/3 — 재시도: {msg[:140]}")
+                _time.sleep(1.5 * (attempt + 1))
+        # 2) 폴백: 직접 SELECT (RLS 허용 환경에서만 유효 — 대개 0건)
         try:
             res = (self.supabase.table("customer_records")
                    .select("customer_name,birth,raw")
@@ -579,6 +590,8 @@ class CustomerCrawlWorker(QtCore.QThread):
                     bt = re.sub(r"[^0-9]", "", str(r.get("birth") or ""))[:6]
                     if nm:
                         keys.add((nm, bt))
+            if keys:
+                self._detail_keys_ok = True        # 폴백으로라도 확보 성공
         except Exception:
             pass
         return keys
@@ -597,6 +610,9 @@ class CustomerCrawlWorker(QtCore.QThread):
                 skip_keys = self._fetch_detail_done_keys(logger)
                 if skip_keys:
                     logger.info(f"[상세] 이미 상세수집된 {len(skip_keys)}명은 건너뜁니다(이어받기).")
+                elif not getattr(self, "_detail_keys_ok", True):
+                    logger.info("[상세] ⚠️ 기수집 목록 조회 실패 — 이번 실행은 이어받기 없이 진행됩니다"
+                                "(이미 수집한 고객도 재수집; 중복 행·데이터 손상은 없음). 네트워크 확인 후 재실행 권장.")
             # 점진 저장 콜백 — 수집하는 대로 서버에 upsert(100건씩). 중도 중단/크래시에도 보존.
             def flush_cb(recs):
                 if not (recs and self.supabase and self.tenant_id and self.device_id):
