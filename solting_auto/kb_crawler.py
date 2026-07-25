@@ -1230,8 +1230,12 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
                 _return_to_list(page)
                 page.wait_for_timeout(700)
                 continue
-            # (2) 로드 확인됨 → 상세 읽기(가입현황 활성 포함). 월보험료가 있는데 보유계약이
-            #     아직 0이면 몇 번 더 읽어 렌더를 기다린다(최대 3회).
+            # (2) 로드 확인됨 → 상세 읽기(가입현황 활성 포함).
+            #     완전성 보장: 목록 '가입건수'>0 이면 보유계약(가입현황)을 반드시 읽어야
+            #     확정한다(빈 계약 조기수락 방지 → 상담용 담보별 계약 완전수집).
+            #     가입건수 0/미상이면 월보험료 0(무보험) 신호로도 확정 허용(기존 동작).
+            _pc = re.sub(r"[^0-9]", "", str((rec or {}).get("policy_count") or ""))
+            need_contracts = bool(_pc) and int(_pc) > 0
             got = None
             for _ in range(3):
                 det = _read_open_detail(page, logger, expand=True)
@@ -1239,14 +1243,16 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
                         det["insured"] == key[0] or (key[1] and det.get("insured_birth", "")[:6] == key[1])):
                     got = det
                     prem = re.sub(r"[^0-9]", "", str(det.get("monthly_premium") or ""))
-                    if det.get("contracts") or not prem or prem == "0":
+                    if det.get("contracts") or (not need_contracts and (not prem or prem == "0")):
                         break
                 page.wait_for_timeout(600)
             if got:
                 gprem = re.sub(r"[^0-9]", "", str(got.get("monthly_premium") or ""))
-                if got.get("contracts") or not gprem or gprem == "0":
+                if got.get("contracts") or (not need_contracts and (not gprem or gprem == "0")):
                     break   # 완전 수집 → 확정
-            got = None       # 불완전(월보험료 있는데 계약 0) → 재시도
+                if need_contracts and logger:
+                    logger.info(f"[상세] {key[0]} 가입건수 {_pc}건인데 보유계약 미확인 — 재시도(완전수집 보장).")
+            got = None       # 불완전(가입건수>0인데 계약 0, 또는 월보험료 있는데 계약 0) → 재시도
             _return_to_list(page)
             page.wait_for_timeout(700)
         if got:
