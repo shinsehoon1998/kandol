@@ -880,20 +880,30 @@ def _grid_rowcount(frame, gid):
 def _sort_list(page, label="가설동의순", logger=None):
     """목록 정렬 토글(예: '가설동의순')을 클릭해 그 순서로 재정렬한다. 정렬 시 목록이
     다시 로딩되므로 호출부에서 이후 _load_full_list 로 전체를 다시 로드해야 한다.
-    (버튼 텍스트가 정확히 일치하는 리프 요소를 찾아 클릭)."""
+
+    라이브 구조(2026-07-27 확인):
+      <input class="w2trigger tab_button active" value="가설동의순">
+    → input 은 innerText/textContent 가 항상 빈 문자열이라 기존의 innerText 전용 매칭으로는
+      구조적으로 절대 찾을 수 없었다(로그의 '못 찾음'이 매번 뜬 원인). value 도 함께 본다.
+      이미 active 면 다시 눌러 토글이 풀리지 않도록 클릭하지 않는다."""
     for fr in list(page.frames):
         try:
             r = fr.evaluate(
                 "(lb)=>{"
                 "const norm=s=>(s||'').replace(/\\s+/g,'').trim();"
-                "const cands=[...document.querySelectorAll('a,button,span,div,li,td')]"
-                ".filter(e=>e.offsetParent && norm(e.innerText||e.textContent)===norm(lb));"
+                "const cands=[...document.querySelectorAll('a,button,span,div,li,td,th,input')]"
+                ".filter(e=>e.offsetParent && norm(e.innerText||e.value||e.textContent)===norm(lb));"
                 "if(!cands.length) return 'no';"
                 "cands.sort((a,b)=>a.querySelectorAll('*').length-b.querySelectorAll('*').length);"
                 "const el=cands[0];"
+                "if(/(^|\\s)active(\\s|$)/.test(String(el.className||''))) return 'already';"
                 "try{(el.querySelector('a')||el).click();}catch(e){}"
                 "try{el.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true}));}catch(e){}"
                 "return 'clicked';}", label)
+            if r == "already":
+                if logger:
+                    logger.info(f"[수집] 목록 정렬 '{label}' 이미 적용됨.")
+                return True
             if r == "clicked":
                 page.wait_for_timeout(1600)   # 재정렬·재조회 대기
                 if logger:
@@ -904,6 +914,91 @@ def _sort_list(page, label="가설동의순", logger=None):
     if logger:
         logger.info(f"[수집] 정렬 버튼 '{label}' 못 찾음 — 현재 정렬 그대로 진행.")
     return False
+
+
+# 조회기간 입력(라이브 확인): <input id="...frDate_input" class="w2inputCalendar_divInput"
+# value="2026-05-27">, 같은 형태의 toDate_input. 화면의 빠른버튼은 '최근 2주일'/'최근 1개월'
+# 뿐이라 3개월은 날짜를 직접 넣는 방법밖에 없다.
+_SET_PERIOD_JS = r"""(m)=>{
+  const pad=n=>String(n).padStart(2,'0');
+  const fmt=d=>d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate());
+  // KB 는 '최근 3개월 이내'만 허용하고 경계값(정확히 3개월)이면 경고 팝업이 뜬다.
+  // 하루 여유를 둬 팝업 없이 최대 범위를 쓴다.
+  const to=new Date(); const fr=new Date();
+  fr.setMonth(fr.getMonth()-m); fr.setDate(fr.getDate()+1);
+  const setVal=(el,v)=>{
+    const cid=String(el.id||'').replace(/_input$/,'');
+    try{ if(window.$p && $p.getComponentById){ const c=$p.getComponentById(cid);
+      if(c && c.setValue){ c.setValue(v); return true; } } }catch(e){}
+    try{ el.value=v;
+      ['input','change','blur'].forEach(ev=>el.dispatchEvent(new Event(ev,{bubbles:true})));
+      return true; }catch(e){ return false; }
+  };
+  const out={n:0};
+  document.querySelectorAll('input').forEach(el=>{
+    if(!el.offsetParent) return;
+    const id=String(el.id||'');
+    if(/frDate/i.test(id)){ if(setVal(el,fmt(fr))){ out.n++; out.from=fmt(fr); } }
+    else if(/toDate/i.test(id)){ if(setVal(el,fmt(to))){ out.n++; out.to=fmt(to); } }
+  });
+  return out;
+}"""
+
+
+def _set_search_period(page, months=3, logger=None):
+    """조회기간을 '최근 N개월'로 설정(시작일=오늘-N개월, 종료일=오늘). 성공 시 True."""
+    for fr in list(page.frames):
+        try:
+            r = fr.evaluate(_SET_PERIOD_JS, months)
+        except Exception:
+            continue
+        if r and r.get("n"):
+            if logger:
+                logger.info(f"[수집] 조회기간 최근 {months}개월 설정: "
+                            f"{r.get('from')} ~ {r.get('to')}")
+            page.wait_for_timeout(400)
+            return True
+    if logger:
+        logger.info(f"[수집] 조회기간 입력란을 찾지 못함 — 화면 설정 그대로 진행.")
+    return False
+
+
+def _prepare_list_screen(page, logger=None, months=3, sort_label="가설동의순", wait_secs=45):
+    """수집 전 '화면 자동 준비' 단일 진입점.
+    보장분석 메인 복귀 → 조회기간(최근 N개월) → 정렬(가설동의순) → 조회 → 목록 로드 대기.
+    재접속 후에도 사람 손 없이 같은 화면 상태를 재현하기 위해 한 함수로 묶었다."""
+    try:
+        _close_kb_popups(page, logger)
+    except Exception:
+        pass
+    try:
+        _return_to_list(page)              # 상세가 열려 있었다면 목록 화면으로
+        page.wait_for_timeout(500)
+    except Exception:
+        pass
+    if months:
+        _set_search_period(page, months, logger)
+    _sort_list(page, sort_label, logger)
+    try:
+        _try_click_inquiry(page, logger)
+    except Exception:
+        pass
+    deadline = time.time() + wait_secs
+    ok = False
+    while time.time() < deadline:
+        try:
+            _close_kb_popups(page, logger)
+            fr, gid = _visible_list_frame_grid(page)
+            if fr and gid and _grid_rowcount(fr, gid) > 0:
+                ok = True
+                break
+        except Exception:
+            pass
+        page.wait_for_timeout(1000)
+    if logger:
+        logger.info("[수집] 화면 자동 준비 " +
+                    ("완료 — 목록 확인됨." if ok else "실패 — 목록을 확인하지 못했습니다."))
+    return ok
 
 
 def _load_full_list(page, frame, gid, logger=None, max_iters=300, idle_stop=10):
@@ -1197,7 +1292,8 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
                      detail_limit=None, skip_keys=None, batch_cap=1000,
                      flush_cb=None, flush_every=15,
                      max_consecutive_fail=20, state=None,
-                     rest_after=8, rest_seconds=60, max_rests=3):
+                     rest_after=8, rest_seconds=60, max_rests=3,
+                     relogin_cb=None, period_months=3, max_relogins=3):
     """목록에서 각 고객을 더블클릭해 상세를 수집, results 각 레코드에 병합.
     라이브 검증 플로우: (보장분석 메인 탭 복귀) → 이름매칭 더블클릭 → 상세 폴링·대조 →
     모두펼치기 ON 읽기 → 복귀 → 다음.
@@ -1242,7 +1338,8 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
     pending = []          # flush 대기(상세 병합 or 팝업스킵된 rec)
     consecutive_fail = 0  # 연속 진입실패/스킵 수(세션만료·시스템장애 조기감지용)
     rests_used = 0        # KB 회복 대기(휴식) 사용 횟수 — 성공 시 복원
-    broken_streak = 0     # -S0001(앱 상태 손상) 연속 발생 수 — 3이면 즉시 중단·재접속 안내
+    broken_streak = 0     # -S0001(앱 상태 손상) 연속 발생 수 — 3이면 자동 재로그인/중단
+    relogins_used = 0     # 자동 재로그인 사용 횟수(무한 루프 방지)
     stop_reason = None    # 자동 중단 사유(세션만료/연속실패) → state 로 상위 전달
 
     def _flush():
@@ -1289,19 +1386,26 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
             # (1) 대상 고객으로 상세가 뜰 때까지 '값싼 이름확인'만 폴링(탭 재사용이라 이전 고객이
             #     잠시 보일 수 있음). 무거운 읽기를 반복하지 않아 빠르다(최대 12초).
             #     이 사이 마케팅미동의·조회불가 등 팝업이 뜨면 즉시 닫고 이 고객은 스킵한다.
-            page.wait_for_timeout(1500)
+            # 대기 최적화(실측: 고객 1명 16.3초 중 12.3초가 이 폴링에서 소모).
+            #  · 고정 대기 1500ms → 400ms (렌더 최소 여유만)
+            #  · 이름 확인 간격 500ms → 150ms (준비되는 즉시 진행)
+            #  · 팝업 검사는 프레임 전수 스캔이라 비싸므로 ~600ms 마다만 수행
+            page.wait_for_timeout(400)
             loaded = False
             wdl = time.time() + 12
+            _tick = 0
             while time.time() < wdl:
-                pops = _close_kb_popups(page, logger)
-                if pops:
-                    popup_reason = pops[0]
-                    break
+                if _tick % 4 == 0:
+                    pops = _close_kb_popups(page, logger)
+                    if pops:
+                        popup_reason = pops[0]
+                        break
                 nm = _detail_customer_name(page)
                 if nm and (nm == key[0] or not key[0]):
                     loaded = True
                     break
-                page.wait_for_timeout(500)
+                _tick += 1
+                page.wait_for_timeout(150)
             if popup_reason:
                 _return_to_list(page)
                 page.wait_for_timeout(600)
@@ -1397,10 +1501,41 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
             if popup_reason and _is_session_broken_popup(popup_reason):
                 broken_streak += 1
                 if broken_streak >= 3:
+                    # 자동 재로그인 → 화면 자동 준비 → 이어서 수집(무인 운영).
+                    if relogin_cb and relogins_used < max_relogins:
+                        relogins_used += 1
+                        if logger:
+                            logger.info(f"[상세] 🔄 KB 오류 {broken_streak}연속 — 자동 재로그인 시도"
+                                        f"({relogins_used}/{max_relogins})...")
+                        try:
+                            ok_login = bool(relogin_cb())
+                        except Exception as re_err:
+                            ok_login = False
+                            if logger:
+                                logger.info(f"[상세] 자동 재로그인 실패: {re_err}")
+                        if ok_login and _prepare_list_screen(page, logger, months=period_months):
+                            # 재조회로 목록이 새로 그려지므로 순회 기준(인덱스)을 다시 만든다.
+                            fr2, gid2 = _visible_list_frame_grid(page)
+                            if fr2 and gid2:
+                                _load_full_list(page, fr2, gid2, logger)
+                                new_rows = _list_rows_via_model(fr2, gid2)
+                                if new_rows:
+                                    list_rows = new_rows
+                                    list_total = len(list_rows)
+                                    idx_of = {_norm_key(r2["name"], r2["birth"]): i
+                                              for i, r2 in enumerate(list_rows)}
+                            broken_streak = 0
+                            consecutive_fail = 0
+                            if logger:
+                                logger.info("[상세] ✅ 재로그인·화면 준비 완료 — 수집을 이어서 진행합니다.")
+                            _flush()          # 재개 전에 수집분 확정 저장
+                            continue
                     stop_reason = (
                         f"KB 오류({popup_reason[:28]})가 {broken_streak}명 연속 발생 — "
                         f"이 오류는 재접속 전까지 회복되지 않습니다. "
-                        f"KB에서 로그아웃 후 다시 로그인한 뒤 재실행하세요(이어받기 됩니다).")
+                        + ("자동 재로그인도 실패했습니다. " if relogin_cb else
+                           "설정 탭에 포털 로그인 정보를 저장하면 자동 재로그인이 동작합니다. ")
+                        + "KB에 다시 로그인한 뒤 재실행하세요(이어받기 됩니다).")
                     if logger:
                         logger.info(f"[상세] ⛔ {stop_reason}")
                     break
@@ -1562,7 +1697,8 @@ def crawl_customers(cdp_url="http://localhost:9222", logger=None,
                     progress_cb=None, stop_cb=None, dump_path=None,
                     wait_secs=40, contact_excel_paths=None,
                     collect_detail=False, detail_limit=None, skip_detail_keys=None,
-                    flush_cb=None, state=None, max_consecutive_fail=20):
+                    flush_cb=None, state=None, max_consecutive_fail=20,
+                    relogin_cb=None, period_months=3, prepare_screen=True):
     """KB 보장분석 고객 데이터를 수집해 정규화 dict 리스트로 반환.
 
     progress_cb(done, total, msg) / stop_cb()->bool / dump_path: 원본 덤프 경로.
@@ -1636,6 +1772,14 @@ def crawl_customers(cdp_url="http://localhost:9222", logger=None,
             #    화면에 이미 보이는 목록은 아무것도 클릭하지 않고 그대로 수집한다
             #    (자동 클릭은 화면 상태를 바꿔 떠 있던 목록을 날릴 수 있어 위험).
             prog(0, 0, "화면의 보장분석 목록 확인 중...")
+            # 0-A) 화면 자동 준비 — 재접속 직후처럼 목록이 준비되지 않은 상태라도
+            #      기간(최근 N개월)·정렬(가설동의순)·조회를 에이전트가 알아서 맞춘다.
+            if prepare_screen and not stopped():
+                try:
+                    prog(0, 0, "화면 자동 준비 중(기간·정렬·조회)...")
+                    _prepare_list_screen(page, logger, months=period_months)
+                except Exception as prep_err:
+                    log(f"[수집] 화면 자동 준비 생략(무시): {prep_err}")
             # 0) 캡처 '전에' 목록을 가설동의순으로 정렬 + 지연로딩 전체 로드(스크롤).
             #    이 단계가 없으면 최초 캡처가 화면에 보이는 20건만 잡아 서버·상세수집이
             #    20건으로 제한된다(전체 로드는 캡처보다 먼저 이뤄져야 함).
@@ -1734,7 +1878,9 @@ def crawl_customers(cdp_url="http://localhost:9222", logger=None,
                                      skip_keys=skip_detail_keys,
                                      flush_cb=flush_cb,
                                      max_consecutive_fail=max_consecutive_fail,
-                                     state=state)
+                                     state=state,
+                                     relogin_cb=relogin_cb,
+                                     period_months=period_months)
                 log(f"[상세] 총 {n}명 상세 병합 완료.")
             except Exception as de:
                 log(f"[상세] 상세 수집 중 오류(수집분은 서버 저장됨): {de}")

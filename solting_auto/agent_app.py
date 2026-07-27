@@ -533,7 +533,8 @@ class CustomerCrawlWorker(QtCore.QThread):
     finished_signal = QtCore.pyqtSignal(bool, str, int)  # success, msg, saved_count
 
     def __init__(self, cdp_url, tenant_id, device_id, supabase_client, dump_path,
-                 contact_excel_paths=None, collect_detail=False, detail_limit=None):
+                 contact_excel_paths=None, collect_detail=False, detail_limit=None,
+                 login_creds=None, period_months=3):
         super().__init__()
         self.cdp_url = cdp_url
         self.tenant_id = tenant_id
@@ -543,7 +544,32 @@ class CustomerCrawlWorker(QtCore.QThread):
         self.contact_excel_paths = contact_excel_paths or []
         self.collect_detail = collect_detail
         self.detail_limit = detail_limit
+        # KB 포털 자동 재로그인용 자격정보(설정 탭에 저장된 값). 비어 있으면 자동 재로그인 미사용.
+        self.login_creds = login_creds or {}
+        self.period_months = period_months
         self.stop_requested = False
+
+    def _make_relogin_cb(self, logger):
+        """KB 세션이 깨졌을 때(-S0001 연속) 호출되는 자동 재로그인 콜백.
+        설정 탭의 '포털 자동 로그인'과 동일한 경로(InsuranceAutomation.login)를 재사용한다.
+        자격정보가 없으면 None 을 돌려 자동 재로그인을 비활성화한다."""
+        cred = self.login_creds or {}
+        uid, pw, birth = (cred.get("id") or "").strip(), cred.get("pw") or "", (cred.get("birth") or "").strip()
+        if not (uid and pw):
+            return None
+
+        def _relogin():
+            from solting_auto.config import load_config
+            from solting_auto.insurance import InsuranceAutomation
+            cfg = load_config(str(APP_DIR / "config.yaml"))
+            cfg["insurance"]["browser"]["mode"] = "attach"
+            cfg["insurance"]["browser"]["cdp_url"] = self.cdp_url
+            cfg["insurance"]["browser"]["skip_login"] = False
+            with InsuranceAutomation(cfg, logger) as auto:
+                auto.login(username=uid, password=pw, birthdate=birth, force=True)
+            return True
+
+        return _relogin
 
     def _fetch_detail_done_keys(self, logger):
         """이미 상세수집된 고객의 (이름, 생년월일6) 집합 — 증분(이어받기)용.
@@ -649,6 +675,8 @@ class CustomerCrawlWorker(QtCore.QThread):
                 skip_detail_keys=skip_keys,
                 flush_cb=flush_cb,          # ← 점진 저장
                 state=crawl_state,          # ← 자동중단 사유 회수
+                relogin_cb=self._make_relogin_cb(logger),   # ← 세션 깨지면 자동 재로그인
+                period_months=self.period_months,           # ← 조회기간 자동 설정
             )
 
             self.rows_signal.emit(records or [])
@@ -2031,6 +2059,20 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         detail_box.addWidget(self.check_detail_unlimited, 0)
         layout.addLayout(detail_box)
 
+        # 화면 자동 준비: 조회기간(최근 N개월) — 시작 시 기간·정렬(가설동의순)·조회를 자동 수행
+        period_box = QtWidgets.QHBoxLayout()
+        period_box.addWidget(QtWidgets.QLabel("🗓️ 조회기간 자동설정: 최근"), 0)
+        self.spin_period_months = QtWidgets.QSpinBox()
+        self.spin_period_months.setRange(0, 12)
+        self.spin_period_months.setValue(3)
+        self.spin_period_months.setSuffix(" 개월")
+        self.spin_period_months.setToolTip(
+            "수집 시작 시 KB 조회기간을 '최근 N개월'로 자동 설정하고, '가설동의순' 정렬 + '조회'까지 자동으로 누릅니다.\n"
+            "0 으로 두면 기간은 건드리지 않고 화면에 설정된 값을 그대로 사용합니다.")
+        period_box.addWidget(self.spin_period_months, 0)
+        period_box.addWidget(QtWidgets.QLabel("→ 정렬·조회까지 자동 (재접속 후에도 그대로 재현)"), 1)
+        layout.addLayout(period_box)
+
         detail_hint = QtWidgets.QLabel("※ 상세수집 시엔 '고객 목록' 화면을 띄운 상태로 두세요(자동으로 하나씩 열고 닫습니다).")
         detail_hint.setStyleSheet("color: #64748b; font-size: 8pt;")
         detail_hint.setWordWrap(True)
@@ -2112,6 +2154,13 @@ class KkandoriAgent(QtWidgets.QMainWindow):
             list(self.crawl_contact_paths),
             collect_detail=collect_detail,
             detail_limit=detail_limit,
+            # 무인 운영: 세션이 깨지면 설정 탭의 포털 로그인 정보로 자동 재로그인 후 이어서 수집
+            login_creds={
+                "id": self.input_login_id.text().strip(),
+                "pw": self.input_login_pw.text(),
+                "birth": self.input_login_birth.text().strip(),
+            },
+            period_months=self.spin_period_months.value(),
         )
         self.customer_crawl_worker.log_signal.connect(self._crawl_log)
         self.customer_crawl_worker.progress_signal.connect(self._crawl_progress)
