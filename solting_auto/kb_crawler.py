@@ -1070,9 +1070,24 @@ _POPUP_ANCESTOR_RE = "w2window|w2modal|w2alert|w2confirm|messagebox|popup|floati
 #  · 영구(permanent): 그 고객은 조회 자체가 불가. 재시도해도 같으므로 영구 스킵 표식을 남겨
 #    다음 실행에서 다시 시도하지 않게 한다.
 _POPUP_TRANSIENT_RE = re.compile(
-    r"S0001|정상적으로\s*수행되지|사용량이\s*많|조회가\s*지연|잠시\s*후|일시적|"
-    r"시스템\s*점검|처리\s*중\s*오류|다시\s*시도"
+    r"사용량이\s*많|조회가\s*지연|잠시\s*후|일시적|시스템\s*점검|처리\s*중\s*오류"
 )
+
+# 세션/앱 상태 손상 — 재접속(재로그인) 전까지 자체 회복되지 않는다.
+# 실측 근거(crawl.log 2026-07-27, 2시간 17분 실행):
+#   · '사용량이 많아 조회가 지연' → 스킵 직후 다음 고객이 곧바로 성공(14:00→14:01,
+#     15:17→15:18, 15:19 등) = 진짜 일시적.
+#   · '-S0001 프로그램이 정상적으로 수행되지 않았습니다' → 15:49:12 최초 발생 후
+#     19명 연속 전부 실패, 2분간 회복 0회 → 대기·재시도는 시간 낭비.
+# → 즉시 안전 중단하고 사용자에게 '재접속 후 재실행'을 안내하는 것이 옳다.
+_POPUP_SESSION_BROKEN_RE = re.compile(
+    r"S0001|정상적으로\s*수행되지\s*않았습니다"
+)
+
+
+def _is_session_broken_popup(reason):
+    """재접속 전까지 회복 불가한 KB 오류인가(-S0001 등)."""
+    return bool(_POPUP_SESSION_BROKEN_RE.search(reason or ""))
 _POPUP_PERMANENT_RE = re.compile(
     r"개인정보노출.{0,10}제한|계약정보\s*조회가\s*불가|가입설계동의\s*미진행|"
     r"마케팅.{0,6}미동의|동의를\s*진행"
@@ -1227,6 +1242,7 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
     pending = []          # flush 대기(상세 병합 or 팝업스킵된 rec)
     consecutive_fail = 0  # 연속 진입실패/스킵 수(세션만료·시스템장애 조기감지용)
     rests_used = 0        # KB 회복 대기(휴식) 사용 횟수 — 성공 시 복원
+    broken_streak = 0     # -S0001(앱 상태 손상) 연속 발생 수 — 3이면 즉시 중단·재접속 안내
     stop_reason = None    # 자동 중단 사유(세션만료/연속실패) → state 로 상위 전달
 
     def _flush():
@@ -1373,8 +1389,23 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
         if got:
             consecutive_fail = 0
             rests_used = 0        # 정상 순항 재개 → 휴식 예산 복원(장시간 실행 대비)
+            broken_streak = 0
         else:
             consecutive_fail += 1
+            # KB 앱 상태 손상(-S0001)은 재접속 전까지 회복되지 않는다(실측: 19명 연속 실패,
+            # 회복 0회). 대기·재시도로 시간 낭비하지 말고 3연속에서 바로 중단·안내한다.
+            if popup_reason and _is_session_broken_popup(popup_reason):
+                broken_streak += 1
+                if broken_streak >= 3:
+                    stop_reason = (
+                        f"KB 오류({popup_reason[:28]})가 {broken_streak}명 연속 발생 — "
+                        f"이 오류는 재접속 전까지 회복되지 않습니다. "
+                        f"KB에서 로그아웃 후 다시 로그인한 뒤 재실행하세요(이어받기 됩니다).")
+                    if logger:
+                        logger.info(f"[상세] ⛔ {stop_reason}")
+                    break
+            else:
+                broken_streak = 0
             sess_lost, why = False, ""
             if popup_reason and _SESSION_LOST_RE.search(popup_reason or ""):
                 sess_lost, why = True, f"팝업문구('{popup_reason[:30]}')"
