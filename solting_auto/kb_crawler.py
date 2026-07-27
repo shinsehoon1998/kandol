@@ -1513,6 +1513,19 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
                             ok_login = False
                             if logger:
                                 logger.info(f"[상세] 자동 재로그인 실패: {re_err}")
+                        if ok_login:
+                            # KB는 로그인 후 메인 화면을 '새 탭'으로 여는 경우가 있다.
+                            # 처음 잡아둔 page 객체를 계속 쓰면 엉뚱한(예전) 탭을 보게 되므로
+                            # 재로그인 직후 대상 페이지를 다시 찾는다(_find_kb_page 점수 선별).
+                            try:
+                                _br = page.context.browser
+                                _np = _find_kb_page(_br, logger) if _br else None
+                                if _np:
+                                    page = _np
+                                    if logger:
+                                        logger.info(f"[상세] 재로그인 후 KB 탭 재확인: {(page.url or '')[:60]}")
+                            except Exception:
+                                pass
                         if ok_login and _prepare_list_screen(page, logger, months=period_months):
                             # 재조회로 목록이 새로 그려지므로 순회 기준(인덱스)을 다시 만든다.
                             fr2, gid2 = _visible_list_frame_grid(page)
