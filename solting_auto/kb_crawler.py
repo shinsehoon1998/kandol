@@ -1019,6 +1019,16 @@ def _norm_key(name, birth):
     return ((name or "").strip(), re.sub(r"[^0-9]", "", str(birth or ""))[:6])
 
 
+def _has_coverage_detail(det):
+    """상세 읽기 결과에 '전체보장현황'(담보별 보장 표)이 실제로 담겼는지.
+    상담에 필수 자료이므로, 비어 있으면 완료로 확정하지 않고 재시도한다."""
+    cd = (det or {}).get("coverage_detail")
+    if not isinstance(cd, dict):
+        return False
+    rows = cd.get("rows")
+    return isinstance(rows, list) and len(rows) > 0
+
+
 # 상세수집 흐름을 막는 KB 알림 팝업(WebSquare 모달) 감지·닫기.
 # 마케팅 미동의·조회불가 등 다양한 팝업을, '모달 조상을 가진 확인/닫기 버튼'만 눌러 닫아
 # 정상 UI 버튼 오탐을 방지한다.
@@ -1243,16 +1253,24 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
                         det["insured"] == key[0] or (key[1] and det.get("insured_birth", "")[:6] == key[1])):
                     got = det
                     prem = re.sub(r"[^0-9]", "", str(det.get("monthly_premium") or ""))
-                    if det.get("contracts") or (not need_contracts and (not prem or prem == "0")):
+                    if (_has_coverage_detail(det)
+                            and (det.get("contracts")
+                                 or (not need_contracts and (not prem or prem == "0")))):
                         break
                 page.wait_for_timeout(600)
             if got:
                 gprem = re.sub(r"[^0-9]", "", str(got.get("monthly_premium") or ""))
-                if got.get("contracts") or (not need_contracts and (not gprem or gprem == "0")):
-                    break   # 완전 수집 → 확정
-                if need_contracts and logger:
-                    logger.info(f"[상세] {key[0]} 가입건수 {_pc}건인데 보유계약 미확인 — 재시도(완전수집 보장).")
-            got = None       # 불완전(가입건수>0인데 계약 0, 또는 월보험료 있는데 계약 0) → 재시도
+                _cov_ok = _has_coverage_detail(got)
+                _con_ok = bool(got.get("contracts")) or (
+                    not need_contracts and (not gprem or gprem == "0"))
+                if _cov_ok and _con_ok:
+                    break   # 완전 수집(전체보장현황 + 보유계약) → 확정
+                if logger:
+                    if not _cov_ok:
+                        logger.info(f"[상세] {key[0]} 전체보장현황 미확인 — 재시도(완전수집 보장).")
+                    elif need_contracts:
+                        logger.info(f"[상세] {key[0]} 가입건수 {_pc}건인데 보유계약 미확인 — 재시도(완전수집 보장).")
+            got = None       # 불완전(전체보장현황 없음, 또는 가입건수>0인데 계약 0) → 재시도
             _return_to_list(page)
             page.wait_for_timeout(700)
         if got:
