@@ -284,24 +284,49 @@ class _Capture:
 
 
 def _find_kb_page(browser, logger=None):
-    """CDP 컨텍스트들에서 KB(nsales) 페이지를 찾는다. 보장분석 우선."""
-    best = None
+    """CDP 컨텍스트들에서 KB(nsales) 페이지를 찾는다 — '보장분석 본체'를 점수로 선별.
+
+    주의: KB 포털(eus/ch/ch_index.jsp)과 보장분석 WebSquare(:8500/wsserver/wq/main)가
+    동시에 열려 있는 경우가 흔하다. 포털 메뉴에도 '보장분석' 텍스트가 있어 텍스트만으로
+    고르면 포털을 잡아 '조회 버튼을 못 찾는' 증상이 난다(실측 2026-07-27).
+    → ① 실제 목록 그리드가 보이는 페이지 ② wsserver(WebSquare 앱) ③ 텍스트 순으로 가점.
+    """
+    cands = []
     for ctx in browser.contexts:
         for pg in ctx.pages:
             try:
                 url = pg.url or ""
             except Exception:
                 continue
-            if "kbinsure" in url.lower() or "nsales" in url.lower():
-                best = best or pg
-                # 보장분석 화면이면 즉시 우선
-                try:
-                    for kw in BOJANG_MENU_KEYWORDS:
-                        if pg.locator(f"text={kw}").count() > 0:
-                            return pg
-                except Exception:
-                    pass
-    return best
+            low = url.lower()
+            if "kbinsure" not in low and "nsales" not in low:
+                continue
+            score = 0
+            try:                                   # ① 목록 그리드 실재 — 가장 확실
+                fr, _gid = _visible_list_frame_grid(pg)
+                if fr:
+                    score += 100
+            except Exception:
+                pass
+            if "wsserver" in low:                  # ② WebSquare 앱(보장분석 본체)
+                score += 10
+            if "ch_index" in low or "/eus/" in low:  # 포털은 감점
+                score -= 5
+            try:                                   # ③ 화면 텍스트(보조 신호)
+                for kw in BOJANG_MENU_KEYWORDS:
+                    if pg.locator(f"text={kw}").count() > 0:
+                        score += 1
+                        break
+            except Exception:
+                pass
+            cands.append((score, url, pg))
+    if not cands:
+        return None
+    cands.sort(key=lambda x: -x[0])
+    best_score, best_url, best_pg = cands[0]
+    if logger and len(cands) > 1:
+        logger.info(f"[수집] KB 탭 {len(cands)}개 중 선택(점수 {best_score}): {best_url[:70]}")
+    return best_pg
 
 
 def _try_click_inquiry(page, logger=None):
