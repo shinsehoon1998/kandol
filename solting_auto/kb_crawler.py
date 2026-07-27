@@ -1039,6 +1039,33 @@ _POPUP_BTN_SELS = [
 ]
 _POPUP_ANCESTOR_RE = "w2window|w2modal|w2alert|w2confirm|messagebox|popup|floatingLayer|confpop"
 
+# 팝업 사유 분류 — 대응이 완전히 다르다.
+#  · 일시(transient): KB 서버측 순간 장애/과부하. 잠시 쉬었다 '같은 고객'을 재시도하면 성공한다.
+#    (실측 2026-07-27: 1시간 40분 정상 순항 뒤 15:50 부터 -S0001 이 무더기 발생 → 차단기 작동)
+#  · 영구(permanent): 그 고객은 조회 자체가 불가. 재시도해도 같으므로 영구 스킵 표식을 남겨
+#    다음 실행에서 다시 시도하지 않게 한다.
+_POPUP_TRANSIENT_RE = re.compile(
+    r"S0001|정상적으로\s*수행되지|사용량이\s*많|조회가\s*지연|잠시\s*후|일시적|"
+    r"시스템\s*점검|처리\s*중\s*오류|다시\s*시도"
+)
+_POPUP_PERMANENT_RE = re.compile(
+    r"개인정보노출.{0,10}제한|계약정보\s*조회가\s*불가|가입설계동의\s*미진행|"
+    r"마케팅.{0,6}미동의|동의를\s*진행"
+)
+
+
+def _is_permanent_popup(reason):
+    """영구 스킵 대상 팝업인가(재시도 무의미)."""
+    return bool(_POPUP_PERMANENT_RE.search(reason or ""))
+
+
+def _is_transient_popup(reason):
+    """일시 오류 팝업인가(백오프 후 재시도하면 성공 가능). 영구 사유가 우선."""
+    r = reason or ""
+    if _POPUP_PERMANENT_RE.search(r):
+        return False
+    return bool(_POPUP_TRANSIENT_RE.search(r))
+
 
 def _close_kb_popups(page, logger=None, max_close=6):
     """상세수집을 막는 KB 알림 팝업(WebSquare 모달)을 감지·닫는다.
@@ -1129,7 +1156,8 @@ def _detect_session_lost(page):
 def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
                      detail_limit=None, skip_keys=None, batch_cap=1000,
                      flush_cb=None, flush_every=15,
-                     max_consecutive_fail=20, state=None):
+                     max_consecutive_fail=20, state=None,
+                     rest_after=8, rest_seconds=60, max_rests=3):
     """목록에서 각 고객을 더블클릭해 상세를 수집, results 각 레코드에 병합.
     라이브 검증 플로우: (보장분석 메인 탭 복귀) → 이름매칭 더블클릭 → 상세 폴링·대조 →
     모두펼치기 ON 읽기 → 복귀 → 다음.
@@ -1173,6 +1201,7 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
     popup_skips = {}
     pending = []          # flush 대기(상세 병합 or 팝업스킵된 rec)
     consecutive_fail = 0  # 연속 진입실패/스킵 수(세션만료·시스템장애 조기감지용)
+    rests_used = 0        # KB 회복 대기(휴식) 사용 횟수 — 성공 시 복원
     stop_reason = None    # 자동 중단 사유(세션만료/연속실패) → state 로 상위 전달
 
     def _flush():
@@ -1200,7 +1229,7 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
         rec = by_key.get(key) or by_key.get((key[0], ""))
         got = None
         popup_reason = None
-        for attempt in range(2):
+        for attempt in range(3):
             _close_kb_popups(page, logger)   # 이전 고객의 잔여 팝업 정리
             fr, gid = _visible_list_frame_grid(page)
             if not fr:
@@ -1235,7 +1264,18 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
             if popup_reason:
                 _return_to_list(page)
                 page.wait_for_timeout(600)
-                break   # 팝업은 재시도해도 또 뜨므로 이 고객은 스킵
+                # 일시 오류(KB 순간 장애/과부하)는 백오프 후 '같은 고객'을 다시 시도한다.
+                # 영구 사유(개인정보 제한 등)는 재시도해도 같으므로 즉시 스킵.
+                if _is_transient_popup(popup_reason) and attempt < 2:
+                    wait_ms = 5000 * (attempt + 1)      # 5초 → 10초
+                    if logger:
+                        logger.info(f"[상세] {key[0]} 일시 오류 팝업 — {wait_ms // 1000}초 대기 후 "
+                                    f"재시도({attempt + 1}/2): {popup_reason[:40]}")
+                    _close_kb_popups(page, logger)
+                    page.wait_for_timeout(wait_ms)
+                    popup_reason = None
+                    continue
+                break   # 영구 사유이거나 재시도 소진 → 이 고객은 스킵
             if not loaded:
                 _return_to_list(page)
                 page.wait_for_timeout(700)
@@ -1279,14 +1319,19 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
             if logger:
                 logger.info(f"[상세] {key[0]} 완료 (보유계약 {len(got.get('contracts') or [])}건) {done}/{total_targets}")
         elif popup_reason:
-            # 마케팅미동의·조회불가 등 팝업으로 상세 진입 불가 → 사유 기록하고 스킵
+            # 팝업으로 상세 진입 불가 → 사유 기록하고 스킵.
+            # 영구 사유는 표식을 남겨 다음 실행에서 재시도하지 않게 한다(시간 낭비 제거).
+            perm = _is_permanent_popup(popup_reason)
             if rec is not None:
                 raw = rec.get("raw") if isinstance(rec.get("raw"), dict) else {}
                 raw["detail_skip_reason"] = f"팝업: {popup_reason}"
+                if perm:
+                    raw["detail_permanent_skip"] = True
                 rec["raw"] = raw
             popup_skips[popup_reason] = popup_skips.get(popup_reason, 0) + 1
             if logger:
-                logger.info(f"[상세] {key[0]} 팝업으로 스킵: {popup_reason[:60]}")
+                logger.info(f"[상세] {key[0]} 팝업으로 스킵({'영구' if perm else '일시—다음 실행 재시도'}): "
+                            f"{popup_reason[:60]}")
         elif logger:
             logger.info(f"[상세] {key[0]} 진입 실패 — 건너뜀(다음 실행에서 재시도).")
         if progress_cb:
@@ -1302,6 +1347,7 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
         # 연속 실패/세션 만료 조기감지 → 무더기 스킵 대신 안전 중단(이어받기로 재개).
         if got:
             consecutive_fail = 0
+            rests_used = 0        # 정상 순항 재개 → 휴식 예산 복원(장시간 실행 대비)
         else:
             consecutive_fail += 1
             sess_lost, why = False, ""
@@ -1315,6 +1361,20 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
                 if logger:
                     logger.info(f"[상세] ⛔ {stop_reason}")
                 break
+            # KB 순간 장애/과부하로 연속 실패가 쌓이면 '중단' 대신 잠시 쉬었다 재개한다.
+            # (실측: 정상 순항하다 KB가 -S0001 을 쏟아내는 구간이 있고, 대개 곧 회복된다)
+            if consecutive_fail >= rest_after and rests_used < max_rests:
+                rests_used += 1
+                if logger:
+                    logger.info(f"[상세] ⏸ 연속 {consecutive_fail}명 실패 — KB 회복 대기 "
+                                f"{rest_seconds}초 후 재개({rests_used}/{max_rests}).")
+                _close_kb_popups(page, logger)
+                page.wait_for_timeout(rest_seconds * 1000)
+                _close_kb_popups(page, logger)
+                _return_to_list(page)
+                page.wait_for_timeout(800)
+                consecutive_fail = 0      # 휴식 후 카운터 리셋하고 계속 진행
+                continue
             if consecutive_fail >= max_consecutive_fail:
                 stop_reason = (f"연속 {consecutive_fail}명 상세 진입 실패 — 자동 중단"
                                f"(KB 세션·화면 상태 확인 필요). 수집분은 저장됨.")
@@ -1334,7 +1394,11 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
             summ = ", ".join(f"{k[:24]} {v}" for k, v in
                              sorted(popup_skips.items(), key=lambda x: -x[1]))
             total_pop = sum(popup_skips.values())
-            logger.info(f"[상세] 팝업으로 스킵 {total_pop}명 — 사유별: {summ}")
+            n_perm = sum(v for k, v in popup_skips.items() if _is_permanent_popup(k))
+            n_tmp = total_pop - n_perm
+            logger.info(f"[상세] 팝업으로 스킵 {total_pop}명 "
+                        f"(일시 {n_tmp}명 — 다음 실행에서 재시도 / 영구 {n_perm}명 — 조회불가) "
+                        f"— 사유별: {summ}")
     return done
 
 
