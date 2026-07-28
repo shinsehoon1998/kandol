@@ -22,18 +22,26 @@ const nonEmptyArr = (v: any) => Array.isArray(v) && v.length > 0;
 
 /* 상담에 필요한 5개 필드가 하나도 빠지지 않은 '완전체' 고객인지.
    (요약 · 보유계약 · 전체보장현황 · 담보별 가입상품 · 계약현황)
-   무보험 고객은 보유계약·담보별상품이 정상적으로 비어 있어 여기서는 제외된다. */
-function isFullDetail(c: any): boolean {
+
+   allowUninsured=true 면 '무보험 고객'도 완전수집으로 인정한다.
+   가입건수 0인 고객은 보유계약·담보별 가입상품이 비어 있는 것이 정상이기 때문
+   (실측: 무보험 상세수집 139명 전원이 보장현황·요약·계약현황은 완비). */
+function isFullDetail(c: any, allowUninsured = false): boolean {
   const cd = c?.coverage_detail;
   const cs = c?.coverage_summary;
-  return (
+  const baseOk =
     !!cd && typeof cd === 'object' &&
     nonEmptyArr(cd.rows) &&                     // 전체보장현황(담보 37행)
-    nonEmptyArr(cd.byProduct) &&                // 담보별 가입상품
-    nonEmptyArr(c?.raw?.contracts) &&           // 보유계약
     nonEmptyArr(c?.contract_status) &&          // 계약현황(정상/실효해지)
-    !!cs && typeof cs === 'object' && Object.values(cs).some((v) => v != null && v !== '')  // 보장요약
-  );
+    !!cs && typeof cs === 'object' && Object.values(cs).some((v) => v != null && v !== '');  // 보장요약
+  if (!baseOk) return false;
+
+  const hasContracts = nonEmptyArr(c?.raw?.contracts) && nonEmptyArr(cd.byProduct);
+  if (hasContracts) return true;
+  if (!allowUninsured) return false;
+  // 무보험(가입건수 0)이면 보유계약·담보별상품이 비어 있어도 완전수집으로 인정
+  const pc = Number(String(c?.policy_count ?? '').replace(/[^0-9]/g, '')) || 0;
+  return pc === 0;
 }
 
 export default function CustomersPage() {
@@ -47,7 +55,7 @@ export default function CustomersPage() {
   const [regFilter, setRegFilter] = useState<'all' | 'registered' | 'unregistered'>('all');
   const [phoneFilter, setPhoneFilter] = useState<'all' | 'has' | 'none'>('all');
   const [premiumFilter, setPremiumFilter] = useState<'all' | 'has' | 'none'>('all');
-  const [detailFilter, setDetailFilter] = useState<'all' | 'has' | 'full' | 'none' | 'skip'>('all');
+  const [detailFilter, setDetailFilter] = useState<'all' | 'has' | 'full' | 'fullU' | 'none' | 'skip'>('all');
   const [regionFilter, setRegionFilter] = useState<string>('all');  // 시/도
   const [sending, setSending] = useState(false);
 
@@ -124,6 +132,7 @@ export default function CustomersPage() {
       const hasDet = hasDetail(c);
       if (detailFilter === 'has' && !hasDet) return false;
       if (detailFilter === 'full' && !isFullDetail(c)) return false;
+      if (detailFilter === 'fullU' && !isFullDetail(c, true)) return false;
       if (detailFilter === 'none' && hasDet) return false;
       if (detailFilter === 'skip' && !detailSkipReason(c)) return false;
       if (regionFilter !== 'all' && parseRegion(c.address).sido !== regionFilter) return false;
@@ -133,7 +142,8 @@ export default function CustomersPage() {
 
   // 상세수집 인원(통계 배너용)
   const detailCount = useMemo(() => customers.filter(hasDetail).length, [customers]);
-  const fullCount = useMemo(() => customers.filter(isFullDetail).length, [customers]);
+  const fullCount = useMemo(() => customers.filter((c) => isFullDetail(c)).length, [customers]);
+  const fullUCount = useMemo(() => customers.filter((c) => isFullDetail(c, true)).length, [customers]);
   const skipCount = useMemo(() => customers.filter((c) => detailSkipReason(c)).length, [customers]);
 
   // 데이터에 존재하는 시/도 목록(지역 필터 옵션)
@@ -250,6 +260,7 @@ export default function CustomersPage() {
             <option value="all">상세: 전체</option>
             <option value="has">상세수집 완료</option>
             <option value="full">✅ 모든 필드 빠짐 없음</option>
+            <option value="fullU">✅ 모든 필드(무보험 포함)</option>
             <option value="skip">⚠️ 팝업 스킵</option>
             <option value="none">상세 미수집</option>
           </select>
@@ -277,6 +288,11 @@ export default function CustomersPage() {
         <span className="text-slate-500">·</span>
         <span className="text-slate-300" title="요약·보유계약·전체보장현황·담보별 가입상품·계약현황이 모두 채워진 고객">
           ✅ 모든 필드 <span className="font-bold text-sky-400">{fullCount.toLocaleString()}</span>명
+          {fullUCount > fullCount && (
+            <span className="text-slate-500 ml-1" title="가입건수 0(무보험) 고객까지 포함한 수 — 보유계약·담보별상품이 비어 있는 게 정상">
+              (무보험 포함 {fullUCount.toLocaleString()})
+            </span>
+          )}
         </span>
         <span className="text-slate-500">·</span>
         <span className="text-slate-400">미수집 {(customers.length - detailCount).toLocaleString()}명</span>
