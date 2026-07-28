@@ -58,6 +58,7 @@ export default function CustomersPage() {
   const [detailFilter, setDetailFilter] = useState<'all' | 'has' | 'full' | 'fullU' | 'none' | 'skip'>('all');
   const [regionFilter, setRegionFilter] = useState<string>('all');  // 시/도
   const [sending, setSending] = useState(false);
+  const [sendProgress, setSendProgress] = useState('');   // 청크 전송 진행 표시
 
   // 페이지 분할
   const [pageSize, setPageSize] = useState(100);
@@ -182,30 +183,62 @@ export default function CustomersPage() {
     });
   }
 
+  /* 보픽 전송 — 반드시 나눠 보낸다.
+     상세수집 고객 1명이 평균 16KB(최대 41KB)라 1,000명이면 20MB 가까이 되는데,
+     서버리스 함수 요청 본문 한도(4.5MB)를 넘으면 HTTP 413 으로 통째 실패한다.
+     100명씩(≈1.6MB) 순차 전송하고 결과를 합산한다. */
+  const BOPICK_BATCH = 100;
+
   async function handleSendToBopick() {
     const rows = customers.filter((c) => selected.has(c.id));
     if (rows.length === 0) return;
-    if (!confirm(`선택한 ${rows.length}명을 보픽플래너로 전송할까요?`)) return;
+    const batches = Math.ceil(rows.length / BOPICK_BATCH);
+    if (!confirm(`선택한 ${rows.length}명을 보픽플래너로 전송할까요?` +
+      (batches > 1 ? `\n\n용량이 커서 ${BOPICK_BATCH}명씩 ${batches}회로 나눠 전송합니다.` : ''))) return;
+
     setSending(true);
+    let inserted = 0, skipped = 0, errors = 0, sent = 0;
+    const failures: string[] = [];
     try {
-      const res = await fetch('/api/bopick-send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ customers: rows }),
-      });
-      const j = await res.json().catch(() => ({}));
-      if (res.ok && j.ok) {
-        const r = j.result || {};
-        alert(`보픽플래너 전송 완료! (총 ${rows.length}명 전송)\n\n신규 적재 ${r.inserted ?? '?'}명\n중복 스킵 ${r.skipped ?? 0}명\n오류 ${r.errors ?? 0}건`);
+      for (let i = 0; i < rows.length; i += BOPICK_BATCH) {
+        const chunk = rows.slice(i, i + BOPICK_BATCH);
+        const idx = Math.floor(i / BOPICK_BATCH) + 1;
+        setSendProgress(`전송 중 ${idx}/${batches} (${sent}/${rows.length}명)`);
+        try {
+          const res = await fetch('/api/bopick-send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ customers: chunk }),
+          });
+          const j = await res.json().catch(() => ({}));
+          if (res.ok && j.ok) {
+            const r = j.result || {};
+            inserted += Number(r.inserted) || 0;
+            skipped += Number(r.skipped) || 0;
+            errors += Number(r.errors) || 0;
+            sent += chunk.length;
+          } else {
+            const msg = j.error || (j.result && j.result.error) || `HTTP ${j.status || res.status}`;
+            failures.push(`${idx}번째 묶음(${chunk.length}명): ${msg}`);
+          }
+        } catch (e: any) {
+          failures.push(`${idx}번째 묶음(${chunk.length}명): ${e.message}`);
+        }
+      }
+
+      if (failures.length === 0) {
+        alert(`보픽플래너 전송 완료! (총 ${sent}명 전송)\n\n신규 적재 ${inserted}명\n중복 스킵 ${skipped}명\n오류 ${errors}건`);
         setSelected(new Set());
       } else {
-        const detail = typeof j.result === 'object' ? JSON.stringify(j.result) : (j.result || '');
-        alert(`전송 실패: ${j.error || (j.result && j.result.error) || ('HTTP ' + (j.status || res.status))}\n${String(detail).slice(0, 300)}`);
+        alert(`일부 전송 실패 — ${sent}/${rows.length}명 전송됨\n\n` +
+          `신규 적재 ${inserted}명 · 중복 스킵 ${skipped}명\n\n실패한 묶음:\n` +
+          failures.slice(0, 5).join('\n') +
+          (failures.length > 5 ? `\n… 외 ${failures.length - 5}건` : '') +
+          `\n\n선택은 유지했습니다. 다시 시도하면 이미 전송된 건은 보픽에서 중복 스킵됩니다.`);
       }
-    } catch (e: any) {
-      alert(`전송 오류: ${e.message}`);
     } finally {
       setSending(false);
+      setSendProgress('');
     }
   }
 
@@ -322,7 +355,7 @@ export default function CustomersPage() {
           )}
           <button onClick={handleSendToBopick} disabled={selected.size === 0 || sending}
             className={`px-4 py-2 rounded-lg text-sm font-bold transition-colors ${selected.size === 0 || sending ? 'bg-slate-800 text-slate-600 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-500 text-white'}`}>
-            {sending ? '전송 중...' : `📤 보픽플래너로 전송 (${selected.size})`}
+            {sending ? (sendProgress || '전송 중...') : `📤 보픽플래너로 전송 (${selected.size})`}
           </button>
         </div>
       </div>
