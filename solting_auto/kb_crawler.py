@@ -684,8 +684,9 @@ _DETAIL_JS = r"""() => {
   //  ① 탭/프로필의 '{이름}고객님 {주민7}' 우선(가장 안정적)
   //  ② 보유계약 조건의 (피)이름 보조
   let insured=null, insured_birth=null;
-  const pm=bt.match(/([가-힣]{2,4})\s*고객님[\s\S]{0,12}?(\d{6})\d?/);
-  if(pm){ insured=pm[1]; insured_birth=pm[2]; }
+  // 공백/전각공백/숫자/영문 포함 이름까지 인식(예: '이　영백','이 순 란','꽃송핸드메이드','김현숙2')
+  const pm=bt.match(/([가-힣A-Za-z0-9][가-힣A-Za-z0-9\s　]{0,11}?)\s*고객님[\s\S]{0,12}?(\d{6})\d?/);
+  if(pm){ insured=pm[1].trim(); insured_birth=pm[2]; }
   if(!insured){ for(const c of contracts){ const m=(c.cond||'').match(/\(피\)\s*([가-힣]{2,4})/); if(m){ insured=m[1]; break; } } }
 
   return {
@@ -721,14 +722,32 @@ def _find_detail_frame(page):
     return None
 
 
+# 상세 로드 대기(초) 하한/상한 — 실측 기반 적응형 조절 범위.
+# 시계(시간대) 대신 실제 소요를 관찰해 조절한다: KB는 새벽에도 느려질 수 있고 낮에도 빠를 수 있다.
+_WAIT_MIN = 12.0
+_WAIT_MAX = 30.0
+
+
+def _norm_name(s):
+    """이름 비교용 정규화 — 일반공백·전각공백(U+3000) 등 모든 공백 제거.
+    KB 목록엔 '이　영백'(전각공백), '이 순 란'(공백) 같은 표기가 실제로 존재한다."""
+    return re.sub(r"[\s　]+", "", str(s or ""))
+
+
 def _detail_customer_name(page):
-    """상세 화면의 고객명('{이름}고객님')만 값싸게 읽는다(로드 대기용, 탭 활성화 없이)."""
+    """상세 화면의 고객명('{이름}고객님')만 값싸게 읽는다(로드 대기용, 탭 활성화 없이).
+
+    ⚠️ 예전 정규식 [가-힣]{2,4} 는 아래 실제 고객을 인식하지 못해 '진입 실패'로 버렸다:
+       '이　영백'(전각공백) · '이 순 란'(공백) · '꽃송핸드메이드'(5자 법인) · '김현숙2'(숫자)
+    → 공백/영문/숫자를 포함해 2~12자까지 받고, 비교는 _norm_name 으로 공백 제거 후 수행."""
     fr = _find_detail_frame(page)
     if not fr:
         return None
     try:
-        return fr.evaluate("()=>{const m=(document.body.innerText||'').match(/([가-힣]{2,4})\\s*고객님/);"
-                           "return m?m[1]:null;}")
+        return fr.evaluate(
+            "()=>{const m=(document.body.innerText||'')"
+            ".match(/([가-힣A-Za-z0-9][가-힣A-Za-z0-9\\s\\u3000]{0,11}?)\\s*고객님/);"
+            "return m?m[1].trim():null;}")
     except Exception:
         return None
 
@@ -1340,6 +1359,8 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
     rests_used = 0        # KB 회복 대기(휴식) 사용 횟수 — 성공 시 복원
     broken_streak = 0     # -S0001(앱 상태 손상) 연속 발생 수 — 3이면 자동 재로그인/중단
     relogins_used = 0     # 자동 재로그인 사용 횟수(무한 루프 방지)
+    load_wait = float(_WAIT_MIN)   # 상세 로드 대기(초) — 실측에 따라 자동 증감
+    recent_load = []               # 최근 성공 로드 소요(초) 표본
     stop_reason = None    # 자동 중단 사유(세션만료/연속실패) → state 로 상위 전달
 
     def _flush():
@@ -1392,7 +1413,12 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
             #  · 팝업 검사는 프레임 전수 스캔이라 비싸므로 ~600ms 마다만 수행
             page.wait_for_timeout(400)
             loaded = False
-            wdl = time.time() + 12
+            # 적응형 대기: KB가 느린 시간대(낮)엔 12초 고정 타임아웃을 넘겨 대량으로
+            # '진입 실패'가 났다(실측 낮 38~82% vs 새벽 0~5%). 시계 대신 '실제 로드 소요'를
+            # 관찰해 자동 조절한다. 재시도일수록 더 길게 준다.
+            budget = min(load_wait * (1.0 + 0.7 * attempt), _WAIT_MAX)
+            t_start = time.time()
+            wdl = t_start + budget
             _tick = 0
             while time.time() < wdl:
                 if _tick % 4 == 0:
@@ -1401,11 +1427,27 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
                         popup_reason = pops[0]
                         break
                 nm = _detail_customer_name(page)
-                if nm and (nm == key[0] or not key[0]):
+                if nm and (_norm_name(nm) == _norm_name(key[0]) or not key[0]):
                     loaded = True
                     break
                 _tick += 1
                 page.wait_for_timeout(150)
+            if loaded:
+                # 성공 소요를 표본에 남겨 다음 대기시간 산정에 사용
+                recent_load.append(time.time() - t_start)
+                if len(recent_load) > 20:
+                    del recent_load[0]
+                if len(recent_load) >= 5:
+                    srt = sorted(recent_load)
+                    p90 = srt[min(len(srt) - 1, int(len(srt) * 0.9))]
+                    target = min(max(p90 * 2.5, _WAIT_MIN), _WAIT_MAX)
+                    load_wait = round(0.7 * load_wait + 0.3 * target, 1)
+            elif not popup_reason:
+                # 못 뜬 경우엔 즉시 여유를 늘려 다음 고객·다음 시도에 반영
+                new_wait = min(round(load_wait * 1.5, 1), _WAIT_MAX)
+                if new_wait > load_wait and logger and attempt == 0:
+                    logger.info(f"[상세] 화면이 느립니다 — 로드 대기 {load_wait}s → {new_wait}s 로 자동 조정.")
+                load_wait = new_wait
             if popup_reason:
                 _return_to_list(page)
                 page.wait_for_timeout(600)
@@ -1435,7 +1477,8 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
             for _ in range(3):
                 det = _read_open_detail(page, logger, expand=True)
                 if det and det.get("insured") and (
-                        det["insured"] == key[0] or (key[1] and det.get("insured_birth", "")[:6] == key[1])):
+                        _norm_name(det["insured"]) == _norm_name(key[0])
+                        or (key[1] and det.get("insured_birth", "")[:6] == key[1])):
                     got = det
                     prem = re.sub(r"[^0-9]", "", str(det.get("monthly_premium") or ""))
                     if (_has_coverage_detail(det)
