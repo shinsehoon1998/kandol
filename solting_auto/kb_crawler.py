@@ -685,7 +685,8 @@ _DETAIL_JS = r"""() => {
   //  ② 보유계약 조건의 (피)이름 보조
   let insured=null, insured_birth=null;
   // 공백/전각공백/숫자/영문 포함 이름까지 인식(예: '이　영백','이 순 란','꽃송핸드메이드','김현숙2')
-  const pm=bt.match(/([가-힣A-Za-z0-9][가-힣A-Za-z0-9\s　]{0,11}?)\s*고객님[\s\S]{0,12}?(\d{6})\d?/);
+  // 단 줄바꿈은 제외 — \s 를 쓰면 앞쪽 UI 텍스트까지 끌려온다.
+  const pm=bt.match(/([가-힣A-Za-z0-9][가-힣A-Za-z0-9 　]{0,11}?)[ 　]*고객님[\s\S]{0,12}?(\d{6})\d?/);
   if(pm){ insured=pm[1].trim(); insured_birth=pm[2]; }
   if(!insured){ for(const c of contracts){ const m=(c.cond||'').match(/\(피\)\s*([가-힣]{2,4})/); if(m){ insured=m[1]; break; } } }
 
@@ -734,6 +735,17 @@ def _norm_name(s):
     return re.sub(r"[\s　]+", "", str(s or ""))
 
 
+def _name_matches(detected, target):
+    """화면에서 읽은 이름이 대상 고객과 같은가.
+
+    화면 본문에는 '…보장분석 홍길동고객님' 처럼 앞쪽 UI 텍스트가 붙어 잡힐 수 있으므로
+    공백 제거 후 '완전일치 또는 끝일치'로 본다(끝일치라 다른 고객으로 오인될 위험은 낮다)."""
+    d, t = _norm_name(detected), _norm_name(target)
+    if not d or not t:
+        return False
+    return d == t or d.endswith(t)
+
+
 def _detail_customer_name(page):
     """상세 화면의 고객명('{이름}고객님')만 값싸게 읽는다(로드 대기용, 탭 활성화 없이).
 
@@ -744,9 +756,12 @@ def _detail_customer_name(page):
     if not fr:
         return None
     try:
+        # ⚠️ 공백 문자군에 \s 를 쓰면 '줄바꿈'까지 포함돼 화면 앞쪽 UI 텍스트를 통째로
+        #    끌어온다(v1.9.9 회귀: '…보장분석\n조영희' 가 잡혀 이름 대조가 100% 실패).
+        #    한 줄 안의 공백/전각공백만 허용한다.
         return fr.evaluate(
             "()=>{const m=(document.body.innerText||'')"
-            ".match(/([가-힣A-Za-z0-9][가-힣A-Za-z0-9\\s\\u3000]{0,11}?)\\s*고객님/);"
+            ".match(/([가-힣A-Za-z0-9][가-힣A-Za-z0-9 \\u3000]{0,11}?)[ \\u3000]*고객님/);"
             "return m?m[1].trim():null;}")
     except Exception:
         return None
@@ -1427,7 +1442,7 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
                         popup_reason = pops[0]
                         break
                 nm = _detail_customer_name(page)
-                if nm and (_norm_name(nm) == _norm_name(key[0]) or not key[0]):
+                if nm and (_name_matches(nm, key[0]) or not key[0]):
                     loaded = True
                     break
                 _tick += 1
@@ -1477,7 +1492,7 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
             for _ in range(3):
                 det = _read_open_detail(page, logger, expand=True)
                 if det and det.get("insured") and (
-                        _norm_name(det["insured"]) == _norm_name(key[0])
+                        _name_matches(det["insured"], key[0])
                         or (key[1] and det.get("insured_birth", "")[:6] == key[1])):
                     got = det
                     prem = re.sub(r"[^0-9]", "", str(det.get("monthly_premium") or ""))
