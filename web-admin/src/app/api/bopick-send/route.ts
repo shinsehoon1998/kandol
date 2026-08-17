@@ -1,7 +1,13 @@
 // 고객DB → 보픽플래너(보픽 리드 인입 API) 전송 프록시 (서버 라우트).
 // 브라우저에서 직접 부르면 CORS·API키 노출 문제가 있어 서버에서 대신 전송한다.
 //
-// 보픽 인입 스펙: POST .../functions/v1/ingest-kandori , 헤더 x-api-key, 멱등(전화번호 중복 skip).
+// 보픽 인입 스펙(2026-08-17 개정, Edge Function v8):
+//   POST .../functions/v1/ingest-kandori , 헤더 x-api-key
+//   · mode="upsert" → 기존 고객이면 갱신. **생략하면 skip 이라 보강분이 반영되지 않는다.**
+//   · 중복 판정: external_id(1순위) → phone(2순위, 숫자만 비교)
+//   · 갱신 대상: metadata 전체(병합) · name · phone · birth_date
+//     status·배정 담당자·방문일정·배차비용은 건드리지 않으므로 상담 중인 리드에 재전송해도 안전.
+//   · 응답: { ok, mode, received, inserted, updated, skipped, errors }
 //
 // 환경변수(Vercel: kandol Project → Settings → Environment Variables):
 //   BOPICK_API_KEY  : 보픽 인입 API 키 (필수, 서버 전용 — 절대 코드/클라이언트에 하드코딩 금지)
@@ -42,9 +48,14 @@ export async function POST(request: Request) {
   // ⚠️ 상세수집 데이터(계약현황·보장상세 등)를 중첩 JSON 그대로 보내면 보픽 화면이
   //    '[object Object]' 로 표시되므로, 사람이 읽기 좋은 '텍스트'로 변환해 보낸다.
   const payload = {
+    // 생략하면 보픽이 skip 처리해 상세수집 보강분이 반영되지 않는다.
+    mode: 'upsert',
     source: 'kandori-customer-db',
     count: customers.length,
     customers: customers.map((c) => ({
+      // 중복 판정 1순위. 전화번호가 정정돼도 같은 사람으로 이어붙도록 고객 UUID 를 보낸다
+      // (전화번호만으로 매칭하면 번호 정정 시 한 사람이 두 건으로 늘어난다).
+      external_id: c.id ?? null,
       customer_name: c.customer_name ?? null,
       phone: c.phone ?? null,
       address: c.address ?? null,

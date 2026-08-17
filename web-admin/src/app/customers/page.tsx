@@ -226,9 +226,10 @@ export default function CustomersPage() {
       (batches > 1 ? `\n\n용량이 커서 ${BOPICK_BATCH}명씩 ${batches}회로 나눠 전송합니다.` : ''))) return;
 
     setSending(true);
-    let inserted = 0, skipped = 0, errors = 0, sent = 0;
+    let inserted = 0, updated = 0, skipped = 0, errors = 0, sent = 0;
     const failures: string[] = [];
     const sentIds: string[] = [];
+    const modes = new Set<string>();   // 보픽이 실제 적용한 모드(구버전이면 'skip' 이 온다)
     try {
       for (let i = 0; i < rows.length; i += BOPICK_BATCH) {
         const chunk = rows.slice(i, i + BOPICK_BATCH);
@@ -244,8 +245,10 @@ export default function CustomersPage() {
           if (res.ok && j.ok) {
             const r = j.result || {};
             inserted += Number(r.inserted) || 0;
+            updated += Number(r.updated) || 0;
             skipped += Number(r.skipped) || 0;
             errors += Number(r.errors) || 0;
+            if (r.mode) modes.add(String(r.mode));
             sent += chunk.length;
             sentIds.push(...chunk.map((x) => x.id));
           } else {
@@ -267,15 +270,24 @@ export default function CustomersPage() {
         } catch { /* 기록 실패는 전송 결과에 영향 없음 */ }
       }
 
+      // 보픽이 upsert 를 적용했는지 확인 — 구버전이면 mode 가 'skip' 으로 돌아오고
+      // 기존 고객의 보강분이 통째로 반영되지 않으므로 그냥 넘기면 안 된다.
+      const notUpsert = modes.size > 0 && !modes.has('upsert');
+      const modeWarn = notUpsert
+        ? `\n\n⚠️ 보픽이 '${[...modes].join(',')}' 모드로 처리했습니다.\n` +
+          `기존 고객의 보강 데이터가 반영되지 않았습니다. 보픽 측 확인이 필요합니다.`
+        : '';
+
       if (failures.length === 0) {
-        alert(`보픽플래너 전송 완료! (총 ${sent}명 전송)\n\n신규 적재 ${inserted}명\n중복 스킵 ${skipped}명\n오류 ${errors}건`);
+        alert(`보픽플래너 전송 완료! (총 ${sent}명 전송)\n\n` +
+          `신규 적재 ${inserted}명\n갱신 ${updated}명\n건너뜀 ${skipped}명\n오류 ${errors}건${modeWarn}`);
         setSelected(new Set());
       } else {
         alert(`일부 전송 실패 — ${sent}/${rows.length}명 전송됨\n\n` +
-          `신규 적재 ${inserted}명 · 중복 스킵 ${skipped}명\n\n실패한 묶음:\n` +
+          `신규 적재 ${inserted}명 · 갱신 ${updated}명 · 건너뜀 ${skipped}명\n\n실패한 묶음:\n` +
           failures.slice(0, 5).join('\n') +
           (failures.length > 5 ? `\n… 외 ${failures.length - 5}건` : '') +
-          `\n\n선택은 유지했습니다. 다시 시도하면 이미 전송된 건은 보픽에서 중복 스킵됩니다.`);
+          `\n\n선택은 유지했습니다. 다시 시도해도 안전합니다(이미 보낸 건은 갱신 처리).${modeWarn}`);
       }
     } finally {
       setSending(false);
