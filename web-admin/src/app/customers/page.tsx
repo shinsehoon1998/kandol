@@ -27,6 +27,23 @@ const nonEmptyArr = (v: any) => Array.isArray(v) && v.length > 0;
    allowUninsured=true 면 '무보험 고객'도 완전수집으로 인정한다.
    가입건수 0인 고객은 보유계약·담보별 가입상품이 비어 있는 것이 정상이기 때문
    (실측: 무보험 상세수집 139명 전원이 보장현황·요약·계약현황은 완비). */
+/* 보유계약 1건이 '빠짐 없이' 수집됐다고 볼 필수 필드.
+   재수집분 367건 실측 결과 아래 8개는 누락 0건이다.
+   pay_cycle(납입주기)·pay_term(납입기간)·contractor(계약자) 는 뺐다 —
+   실손 계약전환용 같은 상품은 KB 원본에 그 값이 실제로 없어(7.6%),
+   요구하면 정상 수집분 30명 중 20명이 영영 제외된다. */
+const CONTRACT_REQUIRED = [
+  'product', 'monthly', 'start', 'end',
+  'maturity', 'insured', 'pay_count', 'insurer_code',
+] as const;
+
+function contractsComplete(arr: any[]): boolean {
+  return arr.every((x) => CONTRACT_REQUIRED.every((k) => {
+    const v = x?.[k];
+    return v != null && String(v).trim() !== '';
+  }));
+}
+
 function isFullDetail(c: any, allowUninsured = false): boolean {
   const cd = c?.coverage_detail;
   const cs = c?.coverage_summary;
@@ -37,8 +54,11 @@ function isFullDetail(c: any, allowUninsured = false): boolean {
     !!cs && typeof cs === 'object' && Object.values(cs).some((v) => v != null && v !== '');  // 보장요약
   if (!baseOk) return false;
 
-  const hasContracts = nonEmptyArr(c?.raw?.contracts) && nonEmptyArr(cd.byProduct);
-  if (hasContracts) return true;
+  // 보유계약이 있으면 계약 필드까지 빠짐없이 채워져 있어야 인정한다.
+  // (구버전 수집분은 start/end/pay_count/insurer_code 자체가 없어 자동 탈락 → 재수집 대상)
+  const arr = c?.raw?.contracts;
+  const hasContracts = nonEmptyArr(arr) && nonEmptyArr(cd.byProduct);
+  if (hasContracts) return contractsComplete(arr);
   if (!allowUninsured) return false;
   // 무보험(가입건수 0)이면 보유계약·담보별상품이 비어 있어도 완전수집으로 인정
   const pc = Number(String(c?.policy_count ?? '').replace(/[^0-9]/g, '')) || 0;
@@ -58,6 +78,9 @@ export default function CustomersPage() {
   const [premiumFilter, setPremiumFilter] = useState<'all' | 'has' | 'none'>('all');
   const [detailFilter, setDetailFilter] = useState<'all' | 'has' | 'full' | 'fullU' | 'none' | 'skip'>('all');
   const [regionFilter, setRegionFilter] = useState<string>('all');  // 시/도
+  // 보픽은 전화번호 중복을 skip 하므로 고객당 전송 기회가 사실상 한 번뿐이다.
+  // 무엇을 이미 보냈는지 구분하기 위한 필터(bopick_sent_at 기준).
+  const [bopickFilter, setBopickFilter] = useState<'all' | 'sent' | 'unsent'>('all');
   const [sending, setSending] = useState(false);
   const [sendProgress, setSendProgress] = useState('');   // 청크 전송 진행 표시
 
@@ -141,9 +164,11 @@ export default function CustomersPage() {
       if (detailFilter === 'none' && hasDet) return false;
       if (detailFilter === 'skip' && !detailSkipReason(c)) return false;
       if (regionFilter !== 'all' && parseRegion(c.address).sido !== regionFilter) return false;
+      if (bopickFilter === 'sent' && !c.bopick_sent_at) return false;
+      if (bopickFilter === 'unsent' && c.bopick_sent_at) return false;
       return true;
     });
-  }, [customers, search, regFilter, phoneFilter, premiumFilter, detailFilter, regionFilter]);
+  }, [customers, search, regFilter, phoneFilter, premiumFilter, detailFilter, regionFilter, bopickFilter]);
 
   // 상세수집 인원(통계 배너용)
   const detailCount = useMemo(() => customers.filter(hasDetail).length, [customers]);
@@ -159,7 +184,7 @@ export default function CustomersPage() {
   }, [customers]);
 
   // 필터/검색/페이지크기 변경 시 1페이지로 리셋
-  useEffect(() => { setPage(1); }, [search, regFilter, phoneFilter, premiumFilter, detailFilter, regionFilter, pageSize]);
+  useEffect(() => { setPage(1); }, [search, regFilter, phoneFilter, premiumFilter, detailFilter, regionFilter, bopickFilter, pageSize]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const curPage = Math.min(page, totalPages);
@@ -203,6 +228,7 @@ export default function CustomersPage() {
     setSending(true);
     let inserted = 0, skipped = 0, errors = 0, sent = 0;
     const failures: string[] = [];
+    const sentIds: string[] = [];
     try {
       for (let i = 0; i < rows.length; i += BOPICK_BATCH) {
         const chunk = rows.slice(i, i + BOPICK_BATCH);
@@ -221,6 +247,7 @@ export default function CustomersPage() {
             skipped += Number(r.skipped) || 0;
             errors += Number(r.errors) || 0;
             sent += chunk.length;
+            sentIds.push(...chunk.map((x) => x.id));
           } else {
             const msg = j.error || (j.result && j.result.error) || `HTTP ${j.status || res.status}`;
             failures.push(`${idx}번째 묶음(${chunk.length}명): ${msg}`);
@@ -228,6 +255,16 @@ export default function CustomersPage() {
         } catch (e: any) {
           failures.push(`${idx}번째 묶음(${chunk.length}명): ${e.message}`);
         }
+      }
+
+      // 전송 성공분을 서버에 기록 → '보픽 미전송' 필터가 다음부터 정확해진다.
+      // (보픽은 건별 결과를 주지 않으므로 '보냈다'는 사실만 남긴다)
+      if (sentIds.length) {
+        try {
+          await supabase.rpc('mark_bopick_sent', { p_ids: sentIds });
+          setCustomers((prev) => prev.map((c) => (sentIds.includes(c.id)
+            ? { ...c, bopick_sent_at: new Date().toISOString() } : c)));
+        } catch { /* 기록 실패는 전송 결과에 영향 없음 */ }
       }
 
       if (failures.length === 0) {
@@ -300,6 +337,12 @@ export default function CustomersPage() {
             <option value="fullU">✅ 모든 필드(무보험 포함)</option>
             <option value="skip">⚠️ 팝업 스킵</option>
             <option value="none">상세 미수집</option>
+          </select>
+          <select value={bopickFilter} onChange={(e) => setBopickFilter(e.target.value as any)}
+            className="px-2 py-2 rounded-lg bg-slate-900 border border-slate-700 text-sm text-slate-200">
+            <option value="all">보픽: 전체</option>
+            <option value="unsent">📭 보픽 미전송</option>
+            <option value="sent">📤 보픽 전송됨</option>
           </select>
           <select value={regionFilter} onChange={(e) => setRegionFilter(e.target.value)}
             className="px-2 py-2 rounded-lg bg-slate-900 border border-slate-700 text-sm text-slate-200">
