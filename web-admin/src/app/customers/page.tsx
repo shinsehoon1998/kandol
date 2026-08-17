@@ -116,11 +116,14 @@ export default function CustomersPage() {
 
   const filtered = useMemo(() => {
     const q = search.trim();
+    // 전화번호는 서버에 010-1234-5678 형태로 저장된다. 하이픈 없이 쳐도 찾히도록 숫자만 비교.
+    const qDigits = q.replace(/[^0-9]/g, '');
     return customers.filter((c) => {
       if (q && !(
         (c.customer_name || '').includes(q) ||
         (c.birth || '').includes(q) ||
         (c.phone || '').includes(q) ||
+        (qDigits.length >= 4 && (c.phone || '').replace(/[^0-9]/g, '').includes(qDigits)) ||
         (c.address || '').includes(q)
       )) return false;
       if (regFilter === 'registered' && !c.registered_at) return false;

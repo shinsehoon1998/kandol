@@ -2038,6 +2038,33 @@ _XL_PHONE_HINTS = ["휴대폰", "휴대전화", "핸드폰", "전화", "연락�
 _XL_ADDR_HINTS = ["주소", "주소지", "거주지", "address", "addr"]
 
 
+def format_phone_kr(s):
+    """전화번호를 010-1234-5678 형태로 통일.
+
+    엑셀에서 전화번호가 '숫자' 셀로 저장되면 선행 0이 사라져 1012345678 이 된다.
+    (실측: 고객DB 11,201건 중 1,690건) 그대로는 전화를 걸 수도, 중복 판정을 할 수도 없다.
+    자릿수가 규칙에 안 맞으면 원형을 유지한다 — 서버 format_phone_kr() 과 동일 규칙.
+    """
+    x = re.sub(r"[^0-9]", "", str(s or ""))
+    if not x:
+        return ""
+    if x.startswith("82") and len(x) >= 11:      # 국가코드 제거
+        x = "0" + x[2:]
+    if not x.startswith("0"):                    # 날아간 앞자리 0 복원
+        x = "0" + x
+    if x.startswith("02"):                       # 서울 유선
+        if len(x) == 10:
+            return f"{x[:2]}-{x[2:6]}-{x[6:]}"
+        if len(x) == 9:
+            return f"{x[:2]}-{x[2:5]}-{x[5:]}"
+        return x
+    if len(x) == 11:
+        return f"{x[:3]}-{x[3:7]}-{x[7:]}"
+    if len(x) == 10:
+        return f"{x[:3]}-{x[3:6]}-{x[6:]}"
+    return x
+
+
 def _read_excel_contacts(paths, logger=None):
     """동의서 진행 엑셀(들)에서 (성명, 생년월일6, 전화번호, 주소지) 추출.
     반환 list[{customer_name, birth, phone, address}]. 헤더는 키워드로 유연 탐지."""
@@ -2086,7 +2113,7 @@ def _read_excel_contacts(paths, logger=None):
                         d = re.sub(r"[^0-9]", "", str(jumin))
                         if len(d) >= 6:
                             birth = d[:6]
-                    phone = re.sub(r"\s+", "", str(phone)).strip()
+                    phone = format_phone_kr(phone)
                     address = str(addr).strip() if addr is not None else ""
                     if name and phone:
                         out.append({"customer_name": name, "birth": birth,

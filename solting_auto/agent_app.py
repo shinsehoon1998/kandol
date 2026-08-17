@@ -2739,6 +2739,7 @@ class KkandoriAgent(QtWidgets.QMainWindow):
             if not (self.supabase and self.tenant and self.device):
                 return
             import re as _re
+            from solting_auto.kb_crawler import format_phone_kr
             recs = []
             if results:
                 for r in results:
@@ -2747,7 +2748,7 @@ class KkandoriAgent(QtWidgets.QMainWindow):
                         continue
                     digits = _re.sub(r"[^0-9]", "", str(getattr(r, "jumin", "") or ""))
                     birth = digits[:6] if len(digits) >= 6 else ""
-                    phone = str(getattr(r, "phone", "") or "").strip()
+                    phone = format_phone_kr(getattr(r, "phone", ""))
                     address = str(getattr(r, "address", "") or "").strip()
                     rec = {"customer_name": name, "birth": birth}
                     if phone:
@@ -2769,6 +2770,14 @@ class KkandoriAgent(QtWidgets.QMainWindow):
             recs = [r for r in recs if r.get("customer_name")]
             if not recs:
                 return
+            # 생년월일이 없으면 서버가 새 고객으로 만들지 않고 기존 고객에 병합하거나 폐기한다
+            # (2026-08-03 엑셀 업로드로 유령 중복행 2,019건이 생겼던 사고 재발 방지).
+            # 여기서는 운영자가 알 수 있도록 건수만 알린다.
+            no_birth = sum(1 for r in recs if not r.get("birth"))
+            if no_birth:
+                self.log_message(
+                    f"[고객DB] 주민번호/생년월일 없는 {no_birth}건은 새 고객으로 등록하지 않습니다"
+                    " (기존 고객에 병합 또는 폐기). 엑셀에 주민번호 열을 넣으면 정상 등록됩니다.")
             n = 0
             for i in range(0, len(recs), 100):
                 chunk = recs[i:i + 100]
