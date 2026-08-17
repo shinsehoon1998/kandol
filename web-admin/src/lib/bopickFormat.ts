@@ -6,9 +6,45 @@ function won(v: any): string {
   return s;
 }
 
+/* v1.9.11 이전 수집분은 계약 조건이 한 덩어리로 뭉쳐 있다.
+     예) cond = "월납20년납100세만기(계)박경순(피)박경순"
+   KB 화면의 '·' 구분자가 CSS 로 생성되는 것이라 innerText 로 읽으면 사라진 탓이다.
+   전체 재수집(약 35시간)이 끝나기 전에도 제대로 보이도록 여기서 되살린다.
+   신규 수집분은 구조화 필드를 그대로 쓰므로 이 함수를 타지 않는다. */
+export function splitCond(cond: any): {
+  pay_cycle: string; pay_term: string; maturity: string;
+  contractor: string; insured: string;
+} {
+  const s = String(cond || '').replace(/\s*·\s*/g, '');
+  const pick = (re: RegExp) => (s.match(re)?.[1] || '').trim();
+  return {
+    pay_cycle:  pick(/(월납|연납|반기납|분기납|일시납)/),
+    pay_term:   pick(/(\d+년납|\d+세납|전기납|종신납)/),
+    maturity:   pick(/(\d+세만기|\d+년만기|종신(?!납))/),
+    contractor: pick(/\(계\)\s*([^()]+)/),
+    insured:    pick(/\(피\)\s*([^()]+)/),
+  };
+}
+
+/* 계약 1건을 '구조화 필드 우선, 없으면 cond 에서 복원' 한 형태로 정규화. */
+export function normalizeContract(x: any): any {
+  if (!x || typeof x !== 'object') return x;
+  const hasStructured = x.contractor || x.insured || x.pay_cycle || x.pay_term || x.maturity;
+  if (hasStructured) return x;
+  const f = splitCond(x.cond);
+  return {
+    ...x,
+    pay_cycle: f.pay_cycle,
+    pay_term: f.pay_term,
+    maturity: f.maturity,
+    contractor: f.contractor,
+    insured: f.insured,
+  };
+}
+
 // 보유계약: "상품A (48,000원) · 상품B (34,240원) ..."
 export function fmtContracts(raw: any): string {
-  const arr = Array.isArray(raw?.contracts) ? raw.contracts : [];
+  const arr = (Array.isArray(raw?.contracts) ? raw.contracts : []).map(normalizeContract);
   if (!arr.length) return '';
   return arr
     .map((x: any) => {
@@ -40,7 +76,7 @@ export function fmtContracts(raw: any): string {
 /* 보유계약을 보픽 '컬럼 매칭'용 배열로 — 각 필드가 개별 키로 분리되어야
    보픽 화면에서 계약자/피보험자/보험기간/납입조건을 따로 쓸 수 있다. */
 export function contractRows(raw: any): any[] {
-  const arr = Array.isArray(raw?.contracts) ? raw.contracts : [];
+  const arr = (Array.isArray(raw?.contracts) ? raw.contracts : []).map(normalizeContract);
   return arr
     .filter((x: any) => (x?.product || '').trim())
     .map((x: any) => ({

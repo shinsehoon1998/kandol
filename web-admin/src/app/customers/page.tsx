@@ -3,6 +3,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { supabase } from '@/lib/supabase';
 import { parseRegion } from '@/lib/region';
+import { normalizeContract } from '@/lib/bopickFormat';
 
 // 상세수집이 팝업(마케팅미동의·조회불가 등)으로 스킵된 사유 — 에이전트가 raw.detail_skip_reason 에 기록
 function detailSkipReason(c: any): string {
@@ -575,7 +576,10 @@ function CustomerDetailModal({
   fmtWon: (v: any) => string;
 }) {
   const c = customer;
-  const contracts: any[] = Array.isArray(c?.raw?.contracts) ? c.raw.contracts : [];
+  // 구버전 수집분은 납입조건이 한 덩어리로 뭉쳐 있어 계약자/피보험자가 비어 보인다.
+  // normalizeContract 가 cond 에서 복원하므로 재수집 전에도 정상 표시된다.
+  const contracts: any[] = (Array.isArray(c?.raw?.contracts) ? c.raw.contracts : [])
+    .map(normalizeContract);
   const cover = c.coverage_detail;
   const coverRows: any[] = Array.isArray(cover?.rows) ? cover.rows
     : (Array.isArray(cover) ? cover : []);
