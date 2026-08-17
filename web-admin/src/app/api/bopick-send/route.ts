@@ -8,7 +8,7 @@
 //   BOPICK_API_URL  : (선택) 인입 엔드포인트. 미설정 시 아래 기본값 사용.
 
 import { parseRegion } from '@/lib/region';
-import { fmtContracts, fmtContractStatus, fmtCoverageSummary, fmtByProduct } from '@/lib/bopickFormat';
+import { fmtContracts, fmtContractStatus, fmtCoverageSummary, fmtByProduct, contractRows } from '@/lib/bopickFormat';
 
 const DEFAULT_URL = 'https://aftallfjjwzfphqeuwuc.supabase.co/functions/v1/ingest-kandori';
 
@@ -62,6 +62,8 @@ export async function POST(request: Request) {
       crawled_at: c.crawled_at ?? null,
       // ── 읽기 좋은 상세 요약(보픽 표시용) ──────────────────────────
       보유계약: fmtContracts(c.raw) || null,
+      // 컬럼 매칭용 — 계약별로 계약자·피보험자·보험기간·납입주기/기간/만기가 개별 키로 분리
+      보유계약목록: contractRows(c.raw),
       계약현황: fmtContractStatus(c.contract_status) || null,
       보장현황: fmtCoverageSummary(c.coverage_summary) || null,
       담보별가입상품: fmtByProduct(c.coverage_detail) || null,

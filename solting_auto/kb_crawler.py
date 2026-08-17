@@ -661,23 +661,70 @@ _DETAIL_JS = r"""() => {
 
   // 보유계약리스트(카드형): 각 계약카드는 class 'ch_pc_cmlst_item'(라이브 검증).
   // 헤딩 부모체인엔 카드가 없어(형제 서브트리) 카드를 직접 선택해 파싱한다.
+  // 카드의 '리프 토큰'은 라이브 확인 결과 완전히 규칙적이다:
+  //  [보험기간][시작일][~][종료일][상품명][월납][20년납][100세만기][(계)홍길동][(피)홍길동]
+  //  [28,740][원][납입 보험료 상세][납입횟수][9회/240회][납입완료 보험료][금액][납입예정 보험료][금액]
+  // innerText 한 줄로 읽으면 화면의 '·' 구분자가 CSS 생성이라 사라져
+  // '월납20년납100세만기(계)홍길동(피)홍길동' 처럼 뭉친다 → 토큰 단위로 파싱한다.
+  // 보험사는 로고 이미지 파일명이 코드다(N01=메리츠, L51=라이나생명 등) → 코드로 보관.
   let contracts=[];
   const items=[...document.querySelectorAll('[class*=cmlst_item]')]
     .filter(e=>e.offsetParent && /보험기간/.test(e.innerText||''));
   for(const it of items){
-    const lines=(it.innerText||'').split('\n').map(s=>s.trim()).filter(Boolean);
-    let period='',product='',cond='',monthly='';
-    for(let i=0;i<lines.length;i++){
-      if(/^보험기간/.test(lines[i])){
-        period=lines[i].replace(/^보험기간/,'').trim();
-        product=lines[i+1]||'';
-        cond=lines[i+2]||'';
-      }
-      const m=(lines[i]||'').match(/([0-9]{1,3}(?:,[0-9]{3})+)\s*원/);
-      if(m) monthly=m[1];
+    const lv=[...it.querySelectorAll('*')]
+      .filter(e=>e.children.length===0 && (e.innerText||'').trim())
+      .map(e=>(e.innerText||'').trim());
+    if(!lv.length) continue;
+
+    const im=it.querySelector('img');
+    const insurer_code=im ? String(im.src||'').split('/').pop().split('?')[0].replace(/\.(png|gif|jpe?g|svg)$/i,'') : '';
+
+    const dates=lv.filter(t=>/^\d{4}-\d{2}-\d{2}$/.test(t));
+    const start=dates[0]||'', end=dates[1]||'';
+
+    const bi=lv.findIndex(t=>/^보험기간$/.test(t));
+    let product='';
+    if(bi>=0){ for(let j=bi+1;j<lv.length;j++){
+      const t=lv[j];
+      if(/^\d{4}-\d{2}-\d{2}$/.test(t)||t==='~') continue;
+      product=t; break;
+    } }
+
+    const find=re=>{ const t=lv.find(x=>re.test(x)); return t||''; };
+    const pay_cycle=find(/^(월납|연납|반기납|분기납|일시납)$/);
+    const pay_term =find(/^(\d+년납|\d+세납|전기납|일시납|종신납)$/);
+    const maturity =find(/^(\d+세만기|\d+년만기|종신|만기)$/);
+    const contractor=(find(/^\(계\)/)||'').replace(/^\(계\)\s*/,'');
+    const insured_nm=(find(/^\(피\)/)||'').replace(/^\(피\)\s*/,'');
+
+    // 월보험료: '숫자' + 다음 토큰 '원' 조합 우선, 없으면 '숫자원' 단일 토큰
+    let monthly='';
+    for(let j=0;j<lv.length;j++){
+      if(/^[0-9]{1,3}(,[0-9]{3})*$/.test(lv[j]) && lv[j+1]==='원'){ monthly=lv[j]; break; }
     }
-    if(product && !/^총|^정상|^실효/.test(product))
-      contracts.push({period, product, cond, monthly});
+    if(!monthly){ const m=(lv.find(t=>/^[0-9,]+원$/.test(t))||'').match(/^([0-9,]+)원$/); if(m) monthly=m[1]; }
+
+    const after=lab=>{ const i=lv.findIndex(t=>t===lab); return i>=0 ? (lv[i+1]||'') : ''; };
+    const pay_count=find(/^\d+회\/\d+회$/);
+    const paid_amount=after('납입완료 보험료');
+    const remain_amount=after('납입예정 보험료');
+
+    if(product && !/^총|^정상|^실효/.test(product)){
+      contracts.push({
+        // 기존 키(하위호환) — 어드민·보픽 기존 표시가 깨지지 않도록 유지
+        period: (start&&end) ? (start+'~'+end) : '',
+        product, monthly,
+        cond: [pay_cycle,pay_term,maturity,
+               contractor?('(계)'+contractor):'', insured_nm?('(피)'+insured_nm):'']
+              .filter(Boolean).join(' · '),
+        // 신규 구조화 필드
+        insurer_code,                 // 보험사 코드(로고 파일명)
+        start, end,                   // 보험기간 시작/종료
+        pay_cycle, pay_term, maturity,// 납입주기 · 납입기간 · 만기
+        contractor, insured: insured_nm,  // 계약자 · 피보험자
+        pay_count, paid_amount, remain_amount,  // 납입횟수 · 납입완료/예정 보험료
+      });
+    }
   }
 
   // 상세 화면의 고객 식별(교차오염 검증용):
@@ -688,7 +735,7 @@ _DETAIL_JS = r"""() => {
   // 단 줄바꿈은 제외 — \s 를 쓰면 앞쪽 UI 텍스트까지 끌려온다.
   const pm=bt.match(/([가-힣A-Za-z0-9][가-힣A-Za-z0-9 　]{0,11}?)[ 　]*고객님[\s\S]{0,12}?(\d{6})\d?/);
   if(pm){ insured=pm[1].trim(); insured_birth=pm[2]; }
-  if(!insured){ for(const c of contracts){ const m=(c.cond||'').match(/\(피\)\s*([가-힣]{2,4})/); if(m){ insured=m[1]; break; } } }
+  if(!insured){ for(const c of contracts){ if(c.insured){ insured=c.insured; break; } } }
 
   return {
     insured,                 // 상세 화면 고객명 — 대조용

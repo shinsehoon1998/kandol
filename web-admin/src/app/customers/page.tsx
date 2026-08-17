@@ -685,6 +685,8 @@ function CustomerDetailModal({
                       <th className="py-2 px-3">상품명</th>
                       <th className="py-2 px-3">보험기간</th>
                       <th className="py-2 px-3">납입조건</th>
+                      <th className="py-2 px-3">계약자 / 피보험자</th>
+                      <th className="py-2 px-3">납입횟수</th>
                       <th className="py-2 px-3 text-right">월납</th>
                     </tr>
                   </thead>
@@ -692,13 +694,23 @@ function CustomerDetailModal({
                     {contracts.map((x, i) => (
                       <tr key={i}>
                         <td className="py-2 px-3 text-slate-200">{x.product || '-'}</td>
-                        <td className="py-2 px-3 text-xs whitespace-nowrap">{x.period || '-'}</td>
-                        <td className="py-2 px-3 text-xs">{x.cond || '-'}</td>
+                        <td className="py-2 px-3 text-xs whitespace-nowrap">
+                          {[x.start, x.end].filter(Boolean).join('~') || x.period || '-'}
+                        </td>
+                        <td className="py-2 px-3 text-xs">
+                          {[x.pay_cycle, x.pay_term, x.maturity].filter(Boolean).join(' · ') || x.cond || '-'}
+                        </td>
+                        <td className="py-2 px-3 text-xs whitespace-nowrap">
+                          {(x.contractor || x.insured)
+                            ? `${x.contractor || '-'} / ${x.insured || '-'}`
+                            : '-'}
+                        </td>
+                        <td className="py-2 px-3 text-xs whitespace-nowrap">{x.pay_count || '-'}</td>
                         <td className="py-2 px-3 text-right whitespace-nowrap">{x.monthly ? x.monthly + '원' : '-'}</td>
                       </tr>
                     ))}
                     <tr className="border-t border-slate-600 font-bold text-slate-200">
-                      <td className="py-2 px-3" colSpan={3}>합계 (월보험료 {fmtWon(c.monthly_premium)})</td>
+                      <td className="py-2 px-3" colSpan={5}>합계 (월보험료 {fmtWon(c.monthly_premium)})</td>
                       <td className="py-2 px-3 text-right">{contractSum.toLocaleString()}원</td>
                     </tr>
                   </tbody>
