@@ -534,7 +534,8 @@ class CustomerCrawlWorker(QtCore.QThread):
 
     def __init__(self, cdp_url, tenant_id, device_id, supabase_client, dump_path,
                  contact_excel_paths=None, collect_detail=False, detail_limit=None,
-                 login_creds=None, period_months=3):
+                 login_creds=None, period_months=3,
+                 period_from=None, period_to=None):
         super().__init__()
         self.cdp_url = cdp_url
         self.tenant_id = tenant_id
@@ -547,6 +548,9 @@ class CustomerCrawlWorker(QtCore.QThread):
         # KB 포털 자동 재로그인용 자격정보(설정 탭에 저장된 값). 비어 있으면 자동 재로그인 미사용.
         self.login_creds = login_creds or {}
         self.period_months = period_months
+        # 직접 지정 조회기간(과거 내역 수집용). 둘 다 있어야 사용된다.
+        self.period_from = period_from
+        self.period_to = period_to
         self.stop_requested = False
 
     def _make_relogin_cb(self, logger):
@@ -677,6 +681,8 @@ class CustomerCrawlWorker(QtCore.QThread):
                 state=crawl_state,          # ← 자동중단 사유 회수
                 relogin_cb=self._make_relogin_cb(logger),   # ← 세션 깨지면 자동 재로그인
                 period_months=self.period_months,           # ← 조회기간 자동 설정
+                period_from=self.period_from,               # ← 직접 지정 시작일
+                period_to=self.period_to,                   # ← 직접 지정 종료일
             )
 
             self.rows_signal.emit(records or [])
@@ -2059,9 +2065,18 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         detail_box.addWidget(self.check_detail_unlimited, 0)
         layout.addLayout(detail_box)
 
-        # 화면 자동 준비: 조회기간(최근 N개월) — 시작 시 기간·정렬(가설동의순)·조회를 자동 수행
+        # 화면 자동 준비: 조회기간 — 시작 시 기간·정렬(가설동의순)·조회를 자동 수행.
+        # '최근 N개월'은 항상 오늘이 종료일이라 과거 내역을 가져올 수 없다.
+        # → '직접 지정' 모드로 시작일~종료일을 넣어 지난 구간도 수집한다.
         period_box = QtWidgets.QHBoxLayout()
-        period_box.addWidget(QtWidgets.QLabel("🗓️ 조회기간 자동설정: 최근"), 0)
+        period_box.addWidget(QtWidgets.QLabel("🗓️ 조회기간"), 0)
+        self.combo_period_mode = QtWidgets.QComboBox()
+        self.combo_period_mode.addItems(["최근 N개월", "직접 지정"])
+        self.combo_period_mode.setToolTip(
+            "최근 N개월 : 오늘을 종료일로 자동 계산합니다(기본).\n"
+            "직접 지정 : 시작일~종료일을 직접 넣어 과거 내역까지 수집합니다.")
+        period_box.addWidget(self.combo_period_mode, 0)
+
         self.spin_period_months = QtWidgets.QSpinBox()
         self.spin_period_months.setRange(0, 12)
         self.spin_period_months.setValue(3)
@@ -2070,8 +2085,29 @@ class KkandoriAgent(QtWidgets.QMainWindow):
             "수집 시작 시 KB 조회기간을 '최근 N개월'로 자동 설정하고, '가설동의순' 정렬 + '조회'까지 자동으로 누릅니다.\n"
             "0 으로 두면 기간은 건드리지 않고 화면에 설정된 값을 그대로 사용합니다.")
         period_box.addWidget(self.spin_period_months, 0)
-        period_box.addWidget(QtWidgets.QLabel("→ 정렬·조회까지 자동 (재접속 후에도 그대로 재현)"), 1)
+
+        _today = QtCore.QDate.currentDate()
+        self.date_period_from = QtWidgets.QDateEdit(_today.addMonths(-6))
+        self.date_period_to = QtWidgets.QDateEdit(_today.addMonths(-3))
+        for _d in (self.date_period_from, self.date_period_to):
+            _d.setCalendarPopup(True)
+            _d.setDisplayFormat("yyyy-MM-dd")
+            _d.setMaximumDate(_today)
+        self.label_period_tilde = QtWidgets.QLabel("~")
+        period_box.addWidget(self.date_period_from, 0)
+        period_box.addWidget(self.label_period_tilde, 0)
+        period_box.addWidget(self.date_period_to, 0)
+
+        self.label_period_hint = QtWidgets.QLabel("")
+        self.label_period_hint.setStyleSheet("color: #64748b; font-size: 8pt;")
+        self.label_period_hint.setWordWrap(True)
+        period_box.addWidget(self.label_period_hint, 1)
         layout.addLayout(period_box)
+
+        self.combo_period_mode.currentIndexChanged.connect(self._sync_period_mode)
+        self.date_period_from.dateChanged.connect(self._sync_period_mode)
+        self.date_period_to.dateChanged.connect(self._sync_period_mode)
+        self._sync_period_mode()
 
         detail_hint = QtWidgets.QLabel("※ 상세수집 시엔 '고객 목록' 화면을 띄운 상태로 두세요(자동으로 하나씩 열고 닫습니다).")
         detail_hint.setStyleSheet("color: #64748b; font-size: 8pt;")
@@ -2145,6 +2181,16 @@ class KkandoriAgent(QtWidgets.QMainWindow):
             detail_limit = self.spin_detail_limit.value()
         else:
             detail_limit = None
+
+        # 조회기간: '직접 지정' 모드면 시작일/종료일을 문자열로 넘긴다.
+        _pf = _pt = None
+        if self.combo_period_mode.currentIndex() == 1:
+            _pf = self.date_period_from.date().toString("yyyy-MM-dd")
+            _pt = self.date_period_to.date().toString("yyyy-MM-dd")
+            if _pf > _pt:
+                _pf, _pt = _pt, _pf
+            self.log_message(f"[수집] 조회기간 직접 지정: {_pf} ~ {_pt}")
+
         self.customer_crawl_worker = CustomerCrawlWorker(
             "http://localhost:9222",
             self.tenant["id"],
@@ -2161,12 +2207,37 @@ class KkandoriAgent(QtWidgets.QMainWindow):
                 "birth": self.input_login_birth.text().strip(),
             },
             period_months=self.spin_period_months.value(),
+            # '직접 지정' 모드일 때만 시작일/종료일을 넘긴다(없으면 최근 N개월).
+            period_from=_pf,
+            period_to=_pt,
         )
         self.customer_crawl_worker.log_signal.connect(self._crawl_log)
         self.customer_crawl_worker.progress_signal.connect(self._crawl_progress)
         self.customer_crawl_worker.rows_signal.connect(self._crawl_fill_table)
         self.customer_crawl_worker.finished_signal.connect(self._crawl_finished)
         self.customer_crawl_worker.start()
+
+    def _sync_period_mode(self, *_):
+        """조회기간 모드에 따라 입력 위젯을 바꾸고, 구간 길이를 안내한다.
+        KB 는 약 3개월(92일)까지만 조회되므로 그보다 길면 경고를 띄운다."""
+        direct = self.combo_period_mode.currentIndex() == 1
+        self.spin_period_months.setVisible(not direct)
+        for w in (self.date_period_from, self.label_period_tilde, self.date_period_to):
+            w.setVisible(direct)
+        if not direct:
+            self.label_period_hint.setText("→ 정렬·조회까지 자동 (재접속 후에도 그대로 재현)")
+            self.label_period_hint.setStyleSheet("color: #64748b; font-size: 8pt;")
+            return
+        days = self.date_period_from.date().daysTo(self.date_period_to.date())
+        if days < 0:
+            msg, color = "⚠️ 시작일이 종료일보다 뒤입니다.", "#f59e0b"
+        elif days > 92:
+            msg, color = (f"⚠️ {days}일 — KB 는 약 3개월(92일)까지만 조회됩니다. "
+                          "구간을 나눠 여러 번 수집하세요."), "#f59e0b"
+        else:
+            msg, color = f"{days}일 구간 — 정렬·조회까지 자동", "#64748b"
+        self.label_period_hint.setText(msg)
+        self.label_period_hint.setStyleSheet(f"color: {color}; font-size: 8pt;")
 
     def pick_contact_excels(self):
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(

@@ -22,6 +22,7 @@ import json
 import re
 import time
 import xml.etree.ElementTree as ET
+from datetime import datetime
 
 
 # ── 보장분석 목록/상세 트리거용 후보 셀렉터 (보정 가능) ──────────────
@@ -999,14 +1000,23 @@ def _sort_list(page, label="가설동의순", logger=None):
 
 # 조회기간 입력(라이브 확인): <input id="...frDate_input" class="w2inputCalendar_divInput"
 # value="2026-05-27">, 같은 형태의 toDate_input. 화면의 빠른버튼은 '최근 2주일'/'최근 1개월'
-# 뿐이라 3개월은 날짜를 직접 넣는 방법밖에 없다.
-_SET_PERIOD_JS = r"""(m)=>{
+# 뿐이라 그 외 기간은 날짜를 직접 넣는 방법밖에 없다.
+#
+# 인자 o = {m: 개월수, from: 'YYYY-MM-DD', to: 'YYYY-MM-DD'}
+#   from/to 가 있으면 그 구간을 그대로 쓴다(과거 구간 수집용).
+#   없으면 '최근 m개월'을 오늘 기준으로 계산한다.
+_SET_PERIOD_JS = r"""(o)=>{
   const pad=n=>String(n).padStart(2,'0');
   const fmt=d=>d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate());
-  // KB 는 '최근 3개월 이내'만 허용하고 경계값(정확히 3개월)이면 경고 팝업이 뜬다.
-  // 하루 여유를 둬 팝업 없이 최대 범위를 쓴다.
-  const to=new Date(); const fr=new Date();
-  fr.setMonth(fr.getMonth()-m); fr.setDate(fr.getDate()+1);
+  let sFrom=(o&&o.from)||'', sTo=(o&&o.to)||'';
+  if(!sFrom||!sTo){
+    // KB 는 조회 span 이 경계값(정확히 N개월)이면 경고 팝업이 뜬다.
+    // 하루 여유를 둬 팝업 없이 최대 범위를 쓴다.
+    const m=(o&&o.m)||3;
+    const to=new Date(); const fr=new Date();
+    fr.setMonth(fr.getMonth()-m); fr.setDate(fr.getDate()+1);
+    sFrom=fmt(fr); sTo=fmt(to);
+  }
   const setVal=(el,v)=>{
     const cid=String(el.id||'').replace(/_input$/,'');
     try{ if(window.$p && $p.getComponentById){ const c=$p.getComponentById(cid);
@@ -1019,34 +1029,69 @@ _SET_PERIOD_JS = r"""(m)=>{
   document.querySelectorAll('input').forEach(el=>{
     if(!el.offsetParent) return;
     const id=String(el.id||'');
-    if(/frDate/i.test(id)){ if(setVal(el,fmt(fr))){ out.n++; out.from=fmt(fr); } }
-    else if(/toDate/i.test(id)){ if(setVal(el,fmt(to))){ out.n++; out.to=fmt(to); } }
+    if(/frDate/i.test(id)){ if(setVal(el,sFrom)){ out.n++; out.from=sFrom; } }
+    else if(/toDate/i.test(id)){ if(setVal(el,sTo)){ out.n++; out.to=sTo; } }
   });
   return out;
 }"""
 
 
-def _set_search_period(page, months=3, logger=None):
-    """조회기간을 '최근 N개월'로 설정(시작일=오늘-N개월, 종료일=오늘). 성공 시 True."""
+def _norm_date(v):
+    """'2026-05-01' / '20260501' / date / datetime → 'YYYY-MM-DD'. 인식 실패 시 ''."""
+    if not v:
+        return ""
+    if hasattr(v, "strftime"):
+        return v.strftime("%Y-%m-%d")
+    d = re.sub(r"[^0-9]", "", str(v))
+    return f"{d[:4]}-{d[4:6]}-{d[6:8]}" if len(d) == 8 else ""
+
+
+# KB 가 허용하는 조회 span 상한(경험값). 넘으면 KB 가 경고 팝업을 띄우고 조회를 막는다.
+_PERIOD_MAX_DAYS = 92
+
+
+def _set_search_period(page, months=3, date_from=None, date_to=None, logger=None):
+    """조회기간 설정. 성공 시 True.
+
+    date_from/date_to 를 주면 그 구간을 그대로 넣는다(과거 구간 수집용).
+    둘 다 없으면 '최근 N개월'(시작일=오늘-N개월+1일, 종료일=오늘)로 계산한다.
+    """
+    f, t = _norm_date(date_from), _norm_date(date_to)
+    direct = bool(f and t)
+    if direct and f > t:
+        f, t = t, f          # 뒤집혀 들어와도 그대로 진행
+    if direct and logger:
+        try:
+            span = (datetime.strptime(t, "%Y-%m-%d") - datetime.strptime(f, "%Y-%m-%d")).days
+            if span > _PERIOD_MAX_DAYS:
+                logger.warning(
+                    f"[수집] ⚠️ 조회기간이 {span}일입니다 — KB 는 약 3개월(92일) 이내만 허용해 "
+                    "조회가 거부될 수 있습니다. 구간을 나눠 여러 번 수집하세요.")
+        except Exception:
+            pass
+
+    arg = {"m": months, "from": f, "to": t} if direct else {"m": months}
+    label = f"{f} ~ {t} (직접 지정)" if direct else f"최근 {months}개월"
     for fr in list(page.frames):
         try:
-            r = fr.evaluate(_SET_PERIOD_JS, months)
+            r = fr.evaluate(_SET_PERIOD_JS, arg)
         except Exception:
             continue
         if r and r.get("n"):
             if logger:
-                logger.info(f"[수집] 조회기간 최근 {months}개월 설정: "
-                            f"{r.get('from')} ~ {r.get('to')}")
+                logger.info(f"[수집] 조회기간 {label} 설정: {r.get('from')} ~ {r.get('to')}")
             page.wait_for_timeout(400)
             return True
     if logger:
-        logger.info(f"[수집] 조회기간 입력란을 찾지 못함 — 화면 설정 그대로 진행.")
+        logger.info("[수집] 조회기간 입력란을 찾지 못함 — 화면 설정 그대로 진행.")
     return False
 
 
-def _prepare_list_screen(page, logger=None, months=3, sort_label="가설동의순", wait_secs=45):
+def _prepare_list_screen(page, logger=None, months=3, sort_label="가설동의순", wait_secs=45,
+                         date_from=None, date_to=None):
     """수집 전 '화면 자동 준비' 단일 진입점.
-    보장분석 메인 복귀 → 조회기간(최근 N개월) → 정렬(가설동의순) → 조회 → 목록 로드 대기.
+    보장분석 메인 복귀 → 조회기간 → 정렬(가설동의순) → 조회 → 목록 로드 대기.
+    date_from/date_to 를 주면 '최근 N개월' 대신 그 구간을 넣는다(과거 내역 수집).
     재접속 후에도 사람 손 없이 같은 화면 상태를 재현하기 위해 한 함수로 묶었다."""
     try:
         _close_kb_popups(page, logger)
@@ -1057,8 +1102,8 @@ def _prepare_list_screen(page, logger=None, months=3, sort_label="가설동의�
         page.wait_for_timeout(500)
     except Exception:
         pass
-    if months:
-        _set_search_period(page, months, logger)
+    if months or (date_from and date_to):
+        _set_search_period(page, months, date_from, date_to, logger)
     _sort_list(page, sort_label, logger)
     try:
         _try_click_inquiry(page, logger)
@@ -1374,7 +1419,8 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
                      flush_cb=None, flush_every=15,
                      max_consecutive_fail=20, state=None,
                      rest_after=8, rest_seconds=60, max_rests=3,
-                     relogin_cb=None, period_months=3, max_relogins=3):
+                     relogin_cb=None, period_months=3, max_relogins=3,
+                     period_from=None, period_to=None):
     """목록에서 각 고객을 더블클릭해 상세를 수집, results 각 레코드에 병합.
     라이브 검증 플로우: (보장분석 메인 탭 복귀) → 이름매칭 더블클릭 → 상세 폴링·대조 →
     모두펼치기 ON 읽기 → 복귀 → 다음.
@@ -1631,7 +1677,9 @@ def _collect_details(page, results, logger=None, progress_cb=None, stop_cb=None,
                                         logger.info(f"[상세] 재로그인 후 KB 탭 재확인: {(page.url or '')[:60]}")
                             except Exception:
                                 pass
-                        if ok_login and _prepare_list_screen(page, logger, months=period_months):
+                        if ok_login and _prepare_list_screen(
+                                page, logger, months=period_months,
+                                date_from=period_from, date_to=period_to):
                             # 재조회로 목록이 새로 그려지므로 순회 기준(인덱스)을 다시 만든다.
                             fr2, gid2 = _visible_list_frame_grid(page)
                             if fr2 and gid2:
@@ -1816,7 +1864,8 @@ def crawl_customers(cdp_url="http://localhost:9222", logger=None,
                     wait_secs=40, contact_excel_paths=None,
                     collect_detail=False, detail_limit=None, skip_detail_keys=None,
                     flush_cb=None, state=None, max_consecutive_fail=20,
-                    relogin_cb=None, period_months=3, prepare_screen=True):
+                    relogin_cb=None, period_months=3, prepare_screen=True,
+                    period_from=None, period_to=None):
     """KB 보장분석 고객 데이터를 수집해 정규화 dict 리스트로 반환.
 
     progress_cb(done, total, msg) / stop_cb()->bool / dump_path: 원본 덤프 경로.
@@ -1895,7 +1944,8 @@ def crawl_customers(cdp_url="http://localhost:9222", logger=None,
             if prepare_screen and not stopped():
                 try:
                     prog(0, 0, "화면 자동 준비 중(기간·정렬·조회)...")
-                    _prepare_list_screen(page, logger, months=period_months)
+                    _prepare_list_screen(page, logger, months=period_months,
+                                         date_from=period_from, date_to=period_to)
                 except Exception as prep_err:
                     log(f"[수집] 화면 자동 준비 생략(무시): {prep_err}")
             # 0) 캡처 '전에' 목록을 가설동의순으로 정렬 + 지연로딩 전체 로드(스크롤).
@@ -1998,7 +2048,9 @@ def crawl_customers(cdp_url="http://localhost:9222", logger=None,
                                      max_consecutive_fail=max_consecutive_fail,
                                      state=state,
                                      relogin_cb=relogin_cb,
-                                     period_months=period_months)
+                                     period_months=period_months,
+                                     period_from=period_from,
+                                     period_to=period_to)
                 log(f"[상세] 총 {n}명 상세 병합 완료.")
             except Exception as de:
                 log(f"[상세] 상세 수집 중 오류(수집분은 서버 저장됨): {de}")
