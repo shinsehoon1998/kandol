@@ -17,6 +17,7 @@ venv/
 dist/
 build/
 *.spec
+!kkandori.spec
 
 # Next.js 어드민 웹
 web-admin/node_modules/

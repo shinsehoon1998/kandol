@@ -1,0 +1,14 @@
+# 깐돌이 에이전트(Kkandori.exe) 빌드용 의존성 — GitHub Actions(windows) 와 로컬 빌드 공용
+# 버전은 v1.9.13 릴리즈 zip 안의 dist-info 에서 확인한 값. Python 3.13 기준.
+PyQt6==6.11.0
+supabase==2.30.1
+playwright==1.60.0
+openpyxl==3.1.5
+pillow==12.2.0
+pyautogui==0.9.54
+pywinauto==0.6.9
+comtypes==1.4.16
+PyMuPDF
+PyYAML>=6.0
+python-dotenv
+pyinstaller

@@ -1,0 +1,84 @@
+name: build-windows-agent
+
+# 수동 실행 전용: Actions 탭 > build-windows-agent > Run workflow > 버전 입력(예: 1.9.14)
+# 결과: Kkandori_v<버전>.zip 을 아티팩트로 올리고, **초안(draft) 릴리즈**를 만든다.
+# 초안은 공개되지 않으므로 다운로드 링크가 바뀌지 않는다. 확인한 뒤에 사람이 게시한다.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "버전 (예: 1.9.14, v 없이)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-build.txt
+
+      - name: 의존성 설치
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-build.txt
+
+      - name: 단위 테스트
+        run: python -m unittest tests.test_kb_session -v
+
+      - name: 소스 import 점검 (화면 없이)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -c "import solting_auto.agent_app; print('import OK')"
+
+      - name: PyInstaller 빌드
+        run: pyinstaller --noconfirm kkandori.spec
+
+      - name: 빌드 결과 확인
+        shell: pwsh
+        run: |
+          $exe = "dist/Kkandori/Kkandori.exe"
+          if (-not (Test-Path $exe)) { throw "Kkandori.exe 가 없습니다" }
+          if ((Get-Item $exe).Length -lt 5MB) { throw "Kkandori.exe 크기가 비정상입니다" }
+          if (-not (Test-Path "dist/Kkandori/_internal/docs")) { throw "docs 번들이 없습니다" }
+          if (-not (Test-Path "dist/Kkandori/_internal/config.example.yaml")) { throw "config.example.yaml 이 없습니다" }
+          Get-ChildItem dist/Kkandori | Select-Object -First 5 | Out-String | Write-Host
+
+      - name: 실행 점검 (화면 없이 15초)
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $p = Start-Process -FilePath "dist/Kkandori/Kkandori.exe" -PassThru
+          Start-Sleep -Seconds 15
+          if ($p.HasExited) { throw "실행 15초 안에 종료됨 (exit=$($p.ExitCode))" }
+          Stop-Process -Id $p.Id -Force
+          Write-Host "실행 점검 통과"
+
+      - name: zip 만들기
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/Kkandori -DestinationPath "Kkandori_v${{ inputs.version }}.zip"
+          (Get-Item "Kkandori_v${{ inputs.version }}.zip").Length | Write-Host
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Kkandori_v${{ inputs.version }}
+          path: Kkandori_v${{ inputs.version }}.zip
+
+      - name: 초안 릴리즈 만들기
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ inputs.version }}" "Kkandori_v${{ inputs.version }}.zip" `
+            --draft --target "${{ github.sha }}" `
+            --title "깐돌이 v${{ inputs.version }} — KB전산 수동 로그인으로 3단계 바로 사용" `
+            --notes "1·2단계(브라우저 기동·자동 로그인) 없이도, 디버그 Edge 에서 KB전산에 직접 로그인해 두면 3단계(동의서 출력)를 바로 쓸 수 있습니다. 자세한 내용은 docs/사용설명서.md. (GitHub Actions 로 빌드한 초안 릴리즈 — 현장 확인 후 게시)"
