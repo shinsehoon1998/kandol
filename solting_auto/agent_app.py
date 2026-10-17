@@ -36,6 +36,7 @@ if not config_path.exists():
             pass
 
 from solting_auto.runner import process_file, STAGE_SOLTING, STAGE_INSURANCE
+from solting_auto.kb_session import probe_kb_session, STATE_LOGGED_IN, STATE_MESSAGES
 from solting_auto.reporter import SUCCESS, FAIL, SKIP
 from solting_auto.logger import get_logger
 
@@ -478,6 +479,20 @@ class EDMSUploadWorker(QtCore.QThread):
             time.sleep(2)
 
 
+class KbSessionWorker(QtCore.QThread):
+    """디버그 Edge 의 탭 목록만 읽어 KB전산 로그인 상태를 확인한다(읽기 전용, 화면 조작 없음)."""
+    result_signal = QtCore.pyqtSignal(str, str, bool)  # state, url, manual
+
+    def __init__(self, manual=False, cdp_url="http://localhost:9222"):
+        super().__init__()
+        self.manual = manual
+        self.cdp_url = cdp_url
+
+    def run(self):
+        state, url = probe_kb_session(self.cdp_url)
+        self.result_signal.emit(state, url, self.manual)
+
+
 class LoginWorker(QtCore.QThread):
     finished_signal = QtCore.pyqtSignal(bool, str)
 
@@ -742,6 +757,9 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         self.current_job_worker = None
         self.current_edms_worker = None
         self.edms_pdf_paths = []
+        # KB전산 수동 로그인 자동 감지용 상태 (init_ui 보다 먼저 초기화)
+        self._kb_session_worker = None
+        self._kb_last_state = None
         
         self.signaler = Signaler()
         self.signaler.log_signal.connect(self.log_message)
@@ -763,6 +781,12 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         self.init_ui()
         self.load_initial_values()
         self.connect_supabase()
+
+        # 디버그 Edge 에서 KB전산에 수동 로그인해 둔 경우 잠긴 3단계를 자동으로 열어 준다
+        self.kb_session_timer = QtCore.QTimer(self)
+        self.kb_session_timer.setInterval(4000)
+        self.kb_session_timer.timeout.connect(lambda: self.check_kb_session(manual=False))
+        self.kb_session_timer.start()
         
         # Shortcut handler
         self.shortcut_stop = QtGui.QShortcut(QtGui.QKeySequence("Ctrl+D"), self)
@@ -1016,10 +1040,21 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         self.btn_open_edge.setStyleSheet("background-color: #2563eb; color: white; padding: 8px; font-weight: bold;")
         self.btn_open_edge.clicked.connect(self.open_edge_browser)
         step1_layout.addWidget(self.btn_open_edge)
+
+        step1_hint = QtWidgets.QLabel(
+            "이미 이 Edge(디버그 모드)에서 KB전산에 직접 로그인해 두셨다면 2단계 자동 로그인은 건너뛰어도 돼요.\n"
+            "KB전산 홈까지 들어간 상태면 3단계가 자동으로 열립니다. (아래 버튼으로 바로 확인도 가능)")
+        step1_hint.setWordWrap(True)
+        step1_hint.setStyleSheet("color: #94a3b8; font-size: 9pt;")
+        step1_layout.addWidget(step1_hint)
+        self.btn_check_session = QtWidgets.QPushButton("✅ 이미 KB전산에 로그인했어요 — 상태 확인")
+        self.btn_check_session.setStyleSheet("background-color: #0f766e; color: white; padding: 8px; font-weight: bold;")
+        self.btn_check_session.clicked.connect(lambda: self.check_kb_session(manual=True))
+        step1_layout.addWidget(self.btn_check_session)
         layout.addWidget(self.group_step1)
 
         # 2단계
-        self.group_step2 = QtWidgets.QGroupBox("2단계: 포털 자동 로그인")
+        self.group_step2 = QtWidgets.QGroupBox("2단계: 포털 자동 로그인 (선택 — 수동 로그인했다면 생략)")
         step2_layout = QtWidgets.QVBoxLayout(self.group_step2)
         step2_form = QtWidgets.QFormLayout()
         
@@ -1896,6 +1931,42 @@ class KkandoriAgent(QtWidgets.QMainWindow):
             self.btn_open_edge.setEnabled(True)
             self.btn_open_edge.setText("🌐 Edge 브라우저 기동")
 
+    # --- KB전산 수동 로그인 감지 (1·2단계 버튼 없이 3단계 열기) ---
+    def check_kb_session(self, manual=False):
+        """디버그 Edge 에서 KB전산에 로그인돼 있는지 확인한다. 읽기 전용(탭 목록만 확인)."""
+        if self._kb_session_worker is not None and self._kb_session_worker.isRunning():
+            return
+        if not manual and self.group_step3.isEnabled():
+            return  # 이미 3단계가 열려 있으면 자동 감지는 필요 없다
+        if manual:
+            self.btn_check_session.setEnabled(False)
+            self.btn_check_session.setText("확인 중...")
+        worker = KbSessionWorker(manual=manual)
+        worker.result_signal.connect(self.on_kb_session_checked)
+        self._kb_session_worker = worker
+        worker.start()
+
+    def on_kb_session_checked(self, state, url, manual):
+        if manual:
+            self.btn_check_session.setEnabled(True)
+            self.btn_check_session.setText("✅ 이미 KB전산에 로그인했어요 — 상태 확인")
+        changed = state != self._kb_last_state
+        self._kb_last_state = state
+        if state == STATE_LOGGED_IN:
+            if not self.group_step3.isEnabled():
+                self.group_step2.setEnabled(True)
+                self.group_step3.setEnabled(True)
+                self.log_message("[안내] KB전산 로그인 상태를 확인했어요. 1·2단계 버튼 없이도 3단계를 사용할 수 있어요. "
+                                 "엑셀과 저장 폴더를 설정한 뒤 [깐돌이 자동 등록 시작]을 눌러주세요! 🚀")
+            if manual:
+                QtWidgets.QMessageBox.information(
+                    self, "확인 완료", "KB전산 로그인 상태를 확인했어요. 3단계를 바로 사용할 수 있습니다.")
+        else:
+            if manual:
+                QtWidgets.QMessageBox.warning(self, "확인 필요", STATE_MESSAGES.get(state, "KB전산 상태를 확인할 수 없어요."))
+            elif changed and state != "no_browser":
+                self.log_message(f"[안내] {STATE_MESSAGES.get(state, '')}")
+
     def run_auto_login(self):
         username = self.input_login_id.text().strip()
         password = self.input_login_pw.text().strip()
@@ -2622,6 +2693,18 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         if not self.check_solting.isChecked() and not self.check_insurance.isChecked():
             QtWidgets.QMessageBox.warning(self, "경고", "최소 하나 이상의 가동 단계를 선택해야 합니다.")
             return
+
+        # 보험사(KB전산) 단계는 디버그 Edge 에 로그인된 세션이 있어야 한다 — 수동 로그인이어도 된다.
+        if self.check_insurance.isChecked():
+            _state, _url = probe_kb_session()
+            if _state != STATE_LOGGED_IN:
+                _ans = QtWidgets.QMessageBox.question(
+                    self, "KB전산 로그인 확인",
+                    STATE_MESSAGES.get(_state, "KB전산 상태를 확인할 수 없어요.") + "\n\n그래도 진행할까요?",
+                    QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                    QtWidgets.QMessageBox.StandardButton.No)
+                if _ans != QtWidgets.QMessageBox.StandardButton.Yes:
+                    return
 
         # 방법3: 동의서(보험사) 단계가 진행되면, 완료 후 이 엑셀의 전화번호를 고객DB에 자동 적재
         self._last_consent_xlsx = xlsx_path
