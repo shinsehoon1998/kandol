@@ -1,3 +1,5 @@
+import { isQuietKst, parsePhones, sendSolapiSms, SMS_KINDS, smsText } from "./solapi.ts";
+
 const ALLOWED_KINDS = new Set([
   "auth_required",
   "reminder",
@@ -138,14 +140,31 @@ async function sendTelegram(text: string): Promise<number> {
   return sent;
 }
 
-async function maybeLogSmsPlaceholder(payload: AuthNotifyPayload): Promise<void> {
-  if (payload.kind !== "reminder" || payload.waited_min < 10) return;
-  const provider = Deno.env.get("SMS_PROVIDER")?.trim();
-  if (!provider) {
-    console.info("SMS escalation skipped: SMS_PROVIDER is not configured");
-    return;
+// 문자: 솔라피로 사람이 움직여야 할 알림(auth_required·reminder·timeout)만 보낸다. 밤(KST 23~07시)엔 보내지 않는다.
+// 시크릿: SOLAPI_API_KEY, SOLAPI_API_SECRET, SOLAPI_SENDER(솔라피에 등록된 발신번호), KANDOL_ALERT_SMS_TO(쉼표 구분 수신번호).
+async function sendSms(payload: AuthNotifyPayload): Promise<number> {
+  if (!SMS_KINDS.has(payload.kind)) return 0;
+  if (isQuietKst(Date.now())) {
+    console.info("SMS skipped: quiet hours (KST 23-07)");
+    return 0;
   }
-  console.info(`SMS escalation requested but no provider adapter is implemented: ${provider}`);
+  const apiKey = Deno.env.get("SOLAPI_API_KEY")?.trim();
+  const apiSecret = Deno.env.get("SOLAPI_API_SECRET")?.trim();
+  const from = Deno.env.get("SOLAPI_SENDER")?.trim();
+  const to = parsePhones(Deno.env.get("KANDOL_ALERT_SMS_TO"));
+  if (!apiKey || !apiSecret || !from || to.length === 0) {
+    console.info("SMS skipped: SOLAPI secrets or recipients are not configured");
+    return 0;
+  }
+  const result = await sendSolapiSms({
+    apiKey,
+    apiSecret,
+    from,
+    to,
+    text: smsText(payload.kind, payload.row, payload.waited_min),
+  });
+  if (result.error) console.error(`SMS send failed: ${result.error} (${result.failed}/${result.requested})`);
+  return result.requested - result.failed;
 }
 
 Deno.serve(async (request) => {
@@ -157,11 +176,11 @@ Deno.serve(async (request) => {
     if (!(await isActiveRun(payload.run_id))) return json({ error: "unknown_run" }, 403);
     if (shouldSuppress(payload)) return json({ ok: true, deduped: true });
     const text = fixedMessage(payload);
-    const [telegramSent] = await Promise.all([
+    const [telegramSent, smsSent] = await Promise.all([
       sendTelegram(text),
-      maybeLogSmsPlaceholder(payload),
+      sendSms(payload),
     ]);
-    return json({ ok: true, telegram_sent: telegramSent });
+    return json({ ok: true, telegram_sent: telegramSent, sms_sent: smsSent });
   } catch (error) {
     console.error(`KB auth notification rejected: ${error instanceof Error ? error.message : "unknown error"}`);
     return json({ error: "invalid_request" }, 400);
