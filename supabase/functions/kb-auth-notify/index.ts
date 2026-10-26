@@ -88,6 +88,29 @@ function shouldSuppress(payload: AuthNotifyPayload): boolean {
   return false;
 }
 
+// 공개 anon 키만 있으면 누구나 이 함수를 부를 수 있으므로, 실제로 돌고 있는 실행(run)에서 온 요청만 보낸다.
+// Supabase Edge Function 기본 환경변수(SUPABASE_URL·SUPABASE_SERVICE_ROLE_KEY)로 execution_logs 를 확인한다.
+async function isActiveRun(runId: string): Promise<boolean> {
+  const url = Deno.env.get("SUPABASE_URL")?.trim();
+  const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")?.trim();
+  if (!url || !key) {
+    console.error("Run check skipped: SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing");
+    return false;
+  }
+  const query = `${url.replace(/\/+$/, "")}/rest/v1/execution_logs?id=eq.${runId}&select=id,ended_at,started_at`;
+  const response = await fetch(query, { headers: { apikey: key, Authorization: `Bearer ${key}` } });
+  if (!response.ok) {
+    console.error(`Run check failed: HTTP ${response.status}`);
+    return false;
+  }
+  const rows = await response.json() as Array<{ ended_at: string | null; started_at: string | null }>;
+  const run = rows[0];
+  if (!run || run.ended_at) return false;
+  const started = run.started_at ? Date.parse(run.started_at) : NaN;
+  // 재인증 대기 최대 24시간 + 작업 시간 여유 → 72시간 넘은 실행은 거부
+  return Number.isFinite(started) && Date.now() - started < 72 * 60 * 60 * 1000;
+}
+
 async function sendTelegram(text: string): Promise<number> {
   const token = Deno.env.get("TELEGRAM_BOT_TOKEN")?.trim();
   const chatIds = (Deno.env.get("KANDOL_ALERT_TELEGRAM_CHAT_IDS") ?? "")
@@ -131,6 +154,7 @@ Deno.serve(async (request) => {
 
   try {
     const payload = validatePayload(await request.json());
+    if (!(await isActiveRun(payload.run_id))) return json({ error: "unknown_run" }, 403);
     if (shouldSuppress(payload)) return json({ ok: true, deduped: true });
     const text = fixedMessage(payload);
     const [telegramSent] = await Promise.all([
