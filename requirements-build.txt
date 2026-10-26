@@ -8,7 +8,7 @@ pillow==12.2.0
 pyautogui==0.9.54
 pywinauto==0.6.9
 comtypes==1.4.16
-PyMuPDF
+PyMuPDF==1.28.2  # 2.0(메이저)이 onnxruntime·numpy 를 끌고 와 번들 +70MB·API 변경 위험 — v1.9.14 현장 검증 버전 고정
 PyYAML>=6.0
 python-dotenv
 pyinstaller
