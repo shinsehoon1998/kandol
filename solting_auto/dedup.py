@@ -47,6 +47,12 @@ class PhoneDedup:
         if key:
             self._registered.add(key)
 
+    def unmark_seen(self, phone) -> None:
+        """재인증 대기로 실제 시도를 완료하지 못한 번호를 이번 실행 집합에서 되돌린다."""
+        key = normalize_phone(phone)
+        if key:
+            self._seen_in_run.discard(key)
+
     def save(self) -> None:
         if not self.store_path:
             return

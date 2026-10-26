@@ -167,6 +167,63 @@ class AutomationWorker(QtCore.QThread):
         self.log_id = log_id
         self.active_auto = None
         self.polling_active = True
+        self._last_done = 0
+        self._last_total = 0
+        self._manual_reauth_resume = False
+
+    def request_reauth_resume(self):
+        """수동 재개 신호. 인증 상태를 우회하지 않고 다음 폴링만 앞당긴다."""
+        self._manual_reauth_resume = True
+
+    def _notify_kb_reauth(self, kind, row=0, waited_min=0, escalate_sms=False):
+        """anon 키로 Edge Function에 알림 요청을 보낸다. 실패해도 자동화는 계속한다."""
+        try:
+            import requests
+            payload = {
+                "kind": str(kind),
+                "run_id": str(self.log_id),
+                "hwid": get_hwid(),
+                "row": int(row or 0),
+                "waited_min": int(waited_min or 0),
+            }
+            requests.post(
+                f"{SUPABASE_URL.rstrip('/')}/functions/v1/kb-auth-notify",
+                json=payload,
+                headers={
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                    "Content-Type": "application/json",
+                },
+                timeout=5,
+            )
+        except Exception as exc:
+            # 호출 실패는 대기/재개 로직의 실패로 승격하지 않는다.
+            try:
+                self.signaler.log_signal.emit(f"[알림] KB 재인증 알림 요청 실패(무시하고 대기): {exc}")
+            except Exception:
+                pass
+
+    def _record_kb_reauth_status(self, phase, row=0, waited_min=0):
+        self._reauth_row = int(row or 0)
+        if phase == "resumed":
+            message = f"KB 재인증 완료 — {self._reauth_row}행부터 자동 재개"
+        elif phase == "timeout":
+            message = f"KB 재인증 대기 시간 초과 — {self._reauth_row}행"
+        else:
+            message = f"KB 재인증 대기 — {self._reauth_row}행 (대기 {int(waited_min or 0)}분)"
+        try:
+            self.signaler.progress_signal.emit(self._last_done, self._last_total, message)
+        except Exception:
+            pass
+        try:
+            self.supabase.rpc("update_execution_log_progress_via_device", {
+                "p_log_id": self.log_id,
+                "p_done": self._last_done,
+                "p_total": self._last_total,
+                "p_last_message": message,
+            }).execute()
+        except Exception:
+            pass
 
     def run(self):
         import solting_auto
@@ -187,6 +244,8 @@ class AutomationWorker(QtCore.QThread):
         file_handler = _attach_file_log(logger, self.config)
 
         def progress_cb(done, total, last_result):
+            self._last_done = done
+            self._last_total = total
             self.signaler.progress_signal.emit(done, total, f"[{last_result.row_no}행] {last_result.status}")
             # Update DB progress in real-time via RPC
             try:
@@ -198,6 +257,14 @@ class AutomationWorker(QtCore.QThread):
                 }).execute()
             except Exception:
                 pass
+
+        # 재인증 대기 콜백은 실행 스레드 안에서만 설정하고 config.yaml에는 저장하지 않는다.
+        insurance_cfg = self.config.setdefault("insurance", {})
+        reauth_cfg = insurance_cfg.setdefault("reauth", {})
+        reauth_cfg["notify"] = self._notify_kb_reauth
+        reauth_cfg["status"] = self._record_kb_reauth_status
+        reauth_cfg["resume_requested"] = lambda: getattr(self, "_manual_reauth_resume", False)
+        self._manual_reauth_resume = False
 
         try:
             # Update status in DB to running via RPC (일시적 소켓오류는 무시 — 자동화는 계속)
@@ -1258,6 +1325,18 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         self.progress_bar.setValue(0)
         self.progress_bar.setFixedHeight(12)
         layout.addWidget(self.progress_bar)
+
+        # KB 재인증 대기 상태(본인인증은 사람이 직접 수행)
+        reauth_row = QtWidgets.QHBoxLayout()
+        self.lbl_kb_reauth = QtWidgets.QLabel("KB 재인증 대기 없음")
+        self.lbl_kb_reauth.setStyleSheet("color: #94a3b8; font-size: 9pt;")
+        self.btn_kb_resume = QtWidgets.QPushButton("지금 재개")
+        self.btn_kb_resume.setEnabled(False)
+        self.btn_kb_resume.clicked.connect(self.request_kb_reauth_resume)
+        reauth_row.addWidget(self.lbl_kb_reauth)
+        reauth_row.addStretch()
+        reauth_row.addWidget(self.btn_kb_resume)
+        layout.addLayout(reauth_row)
 
         # Console Logs
         self.console = QtWidgets.QTextBrowser()
@@ -2855,6 +2934,12 @@ class KkandoriAgent(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
+    def request_kb_reauth_resume(self):
+        worker = self.current_job_worker
+        if worker and worker.isRunning():
+            worker.request_reauth_resume()
+            self.log_message("[KB] 수동 재개 신호를 보냈습니다. 인증 완료 여부를 다시 확인합니다.")
+
     def log_message(self, text):
         self.console.append(text)
         self.console.moveCursor(QtGui.QTextCursor.MoveOperation.End)
@@ -2862,6 +2947,14 @@ class KkandoriAgent(QtWidgets.QMainWindow):
     def update_progress(self, done, total, last_msg):
         self.progress_bar.setMaximum(total)
         self.progress_bar.setValue(done)
+        if "KB 재인증 대기" in str(last_msg):
+            self.lbl_kb_reauth.setText("⏸ KB 재인증 대기 중 — 인증하면 자동 재개")
+            self.lbl_kb_reauth.setStyleSheet("color: #f59e0b; font-size: 9pt; font-weight: bold;")
+            self.btn_kb_resume.setEnabled(True)
+        elif "KB 재인증 완료" in str(last_msg):
+            self.lbl_kb_reauth.setText("KB 재인증 완료 — 자동 재개 중")
+            self.lbl_kb_reauth.setStyleSheet("color: #10b981; font-size: 9pt;")
+            self.btn_kb_resume.setEnabled(False)
         self.log_message(f"[진행률] {done}/{total} 완료 - {last_msg}")
 
     def automation_finished(self, success, msg, report_url):
@@ -2869,6 +2962,9 @@ class KkandoriAgent(QtWidgets.QMainWindow):
         self.btn_run.setText("▶️ 전산 처리 시작")
         self.btn_stop.setEnabled(False)
         self.btn_stop.setText("🛑 중단 (Ctrl+D)")
+        self.lbl_kb_reauth.setText("KB 재인증 대기 없음")
+        self.lbl_kb_reauth.setStyleSheet("color: #94a3b8; font-size: 9pt;")
+        self.btn_kb_resume.setEnabled(False)
         
         if success:
             QtWidgets.QMessageBox.information(self, "완료", msg)

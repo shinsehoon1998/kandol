@@ -111,6 +111,18 @@ insurance:
     channel: "msedge"                  # launch 모드: msedge | chrome
     skip_login: true                   # attach 모드면 보통 이미 로그인 상태 → 자동로그인 건너뜀
 
+  # KB 세션 만료 시 인증방법 선택 창을 감지하고 같은 고객에서 대기/재개
+  # 본인인증 자체(휴대폰·카카오·PASS 선택 및 인증번호)는 사람이 직접 수행합니다.
+  reauth:
+    poll_interval_sec: 5
+    resume_interval_sec: 5
+    max_wait_sec: 86400
+    escalation_after_sec: 600
+    reminder_interval_sec: 1800
+    quiet_start: "23:00"
+    quiet_end: "07:00"
+    pre_warning_sec: 2700
+
   # PDF 캡처 방식:
   #   oz_windows : 출력이 'OZ 리포트 뷰어'(데스크톱)로 뜨는 경우. Windows 에서
   #                pywinauto 로 'Microsoft Print to PDF' 출력하여 저장 (KB 기본)

@@ -19,12 +19,76 @@ from . import excel_reader, validators
 from .dedup import PhoneDedup
 from .reporter import (ReportSummary, RowResult, SUCCESS, FAIL, SKIP, write_report,
                        REASON_DUP_LOCAL)
+from .kb_reauth import ReauthRequired, WAIT_RESUMED, WAIT_STOPPED, WAIT_TIMEOUT
 
 # 로컬 기등록 스킵 사유(출처 명시)
 _LOCAL_DUP_REASON = f"{REASON_DUP_LOCAL}: 이 PC에서 과거 성공 등록한 고객"
 
 STAGE_SOLTING = "솔팅"
 STAGE_INSURANCE = "보험사"
+
+
+def _reauth_required(engine) -> bool:
+    """보험 엔진의 현재 페이지 목록에서 재인증 대기 필요 여부를 읽는다."""
+    if engine is None or not hasattr(engine, "detect_reauth"):
+        return False
+    state = engine.detect_reauth()
+    if isinstance(state, bool):
+        return state
+    return bool(getattr(state, "required", False))
+
+
+def _wait_for_reauth_if_needed(engine, row_no, logger, force=False):
+    """재인증이 필요하면 엔진의 순수 상태 머신을 기다린다.
+
+    이 경로에서는 행 결과를 만들지 않는다. 따라서 재인증 대기는 실패/연속실패
+    카운트에 들어가지 않고, 호출자는 같은 행을 다시 시도할 수 있다.
+    """
+    if engine is None or not hasattr(engine, "wait_for_reauth"):
+        return False
+    if not force and not _reauth_required(engine):
+        return False
+    logger.warning(f"[{row_no}행] KB 재인증 필요 — 인증 완료까지 현재 고객에서 대기합니다.")
+    result = engine.wait_for_reauth(row_no=row_no)
+    if result == WAIT_RESUMED:
+        logger.info(f"[{row_no}행] KB 재인증 완료 — 같은 고객부터 자동 재개합니다.")
+        return True
+    if result == WAIT_STOPPED:
+        raise RuntimeError("사용자 중단 요청")
+    if result == WAIT_TIMEOUT:
+        raise RuntimeError("KB 재인증 대기 시간이 초과되어 작업을 중단했습니다.")
+    raise RuntimeError(f"KB 재인증 대기 종료 상태를 이해할 수 없습니다: {result}")
+
+
+def _process_row_until_reauth(rec, stages, engines, dedups, run, use_checksum,
+                              shot_folder, logger, dry_run,
+                              stamped_dir_override=None):
+    """재인증 대기 시 실패 결과를 만들지 않고 동일 행을 재처리한다."""
+    engine = engines.get(STAGE_INSURANCE) if STAGE_INSURANCE in stages else None
+    while True:
+        _wait_for_reauth_if_needed(engine, rec.row_no, logger)
+        try:
+            return _process_row(rec, stages, engines, dedups, run, use_checksum,
+                                shot_folder, logger, dry_run,
+                                stamped_dir_override=stamped_dir_override)
+        except ReauthRequired:
+            _wait_for_reauth_if_needed(engine, rec.row_no, logger, force=True)
+
+
+def _process_chunk_until_reauth(chunk, stages, engines, dedups, run, shot_folder,
+                                logger, dry_run, config, summary, progress_cb,
+                                total_records):
+    """배치 모드에서도 재인증이면 배치 결과를 실패로 남기지 않고 재시도한다."""
+    engine = engines.get(STAGE_INSURANCE) if STAGE_INSURANCE in stages else None
+    row_no = chunk[0].row_no if chunk else 0
+    while True:
+        _wait_for_reauth_if_needed(engine, row_no, logger)
+        try:
+            return _process_chunk(chunk, stages, engines, dedups, run, shot_folder,
+                                  logger, dry_run, config, summary, progress_cb,
+                                  total_records)
+        except ReauthRequired:
+            _wait_for_reauth_if_needed(engine, row_no, logger, force=True)
 
 
 def _now():
@@ -148,7 +212,8 @@ def process_file(xlsx_path: str, config: dict, logger, dry_run: bool = False,
                 current_chunk.append(rec)
 
                 if len(current_chunk) == 10:
-                    _process_chunk(current_chunk, stages, engines, dedups, run, shot_folder, logger, dry_run, config, summary, progress_cb, len(records))
+                    _process_chunk_until_reauth(current_chunk, stages, engines, dedups, run, shot_folder,
+                                                 logger, dry_run, config, summary, progress_cb, len(records))
                     current_chunk = []
                     if not dry_run:
                         delay = run.get("row_delay_sec", 1.0)
@@ -160,7 +225,8 @@ def process_file(xlsx_path: str, config: dict, logger, dry_run: bool = False,
                             slept += 0.1
 
             if current_chunk:
-                _process_chunk(current_chunk, stages, engines, dedups, run, shot_folder, logger, dry_run, config, summary, progress_cb, len(records))
+                _process_chunk_until_reauth(current_chunk, stages, engines, dedups, run, shot_folder,
+                                             logger, dry_run, config, summary, progress_cb, len(records))
 
         else:
             # ── 50명 단위 자동 폴더링 설정 (KB 스캔 렉 완화용) ──
@@ -209,9 +275,10 @@ def process_file(xlsx_path: str, config: dict, logger, dry_run: bool = False,
                         ins_engine.pdf_dir = pdf_base / sub
                     stamped_override = str(stamped_base / sub)
 
-                res = _process_row(rec, stages, engines, dedups, run, use_checksum,
-                                   shot_folder, logger, dry_run,
-                                   stamped_dir_override=stamped_override)
+                res = _process_row_until_reauth(
+                    rec, stages, engines, dedups, run, use_checksum,
+                    shot_folder, logger, dry_run,
+                    stamped_dir_override=stamped_override)
                 if auto_folder_enabled and res.status == SUCCESS:
                     success_count += 1
                 summary.add(res)
@@ -421,6 +488,10 @@ def _run_stage(stage, rec, engine, dedup, run, shot_folder, logger, dry_run):
             dedup.mark_registered(rec.phone)
             logger.info(f"[{rec.row_no}행] {stage} 등록 성공")
             return SUCCESS, "", pdf
+        except ReauthRequired:
+            if hasattr(dedup, "unmark_seen"):
+                dedup.unmark_seen(rec.phone)
+            raise
         except DuplicateCustomerError as e:
             logger.info(f"[{rec.row_no}행] {stage} 건너뜀 - {e}")
             return SKIP, str(e), ""
