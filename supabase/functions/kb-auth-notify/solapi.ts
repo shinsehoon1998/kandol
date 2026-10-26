@@ -5,7 +5,7 @@
 export const SOLAPI_BASE = "https://api.solapi.com";
 
 /** 문자를 보내는 알림 종류. 재개(resumed)·예고(pre_warning)는 텔레그램만 — 문자는 사람이 움직여야 할 때만. */
-export const SMS_KINDS = new Set(["auth_required", "reminder", "timeout"]);
+export const SMS_KINDS = new Set(["auth_required", "reminder", "timeout", "test"]);
 
 type SolapiMsg = { messageId?: string; statusCode?: string; statusMessage?: string };
 type SolapiSendResponse = {
@@ -69,6 +69,8 @@ export function smsText(kind: string, row: number, waitedMin: number): string {
       return `[깐돌이] KB 재인증 대기 ${waitedMin}분째. PC 인증창에서 본인인증 해주세요(${at})`;
     case "timeout":
       return `[깐돌이] KB 재인증 대기 시간 초과로 작업이 멈췄습니다(${at}). 다시 시작해주세요`;
+    case "test":
+      return "[깐돌이] 알림 시험 문자입니다. KB 재인증 창이 뜨면 이 번호로 문자가 갑니다";
     default:
       throw new Error("unsupported sms kind");
   }

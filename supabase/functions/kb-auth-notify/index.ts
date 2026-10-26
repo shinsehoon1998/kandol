@@ -6,6 +6,7 @@ const ALLOWED_KINDS = new Set([
   "resumed",
   "pre_warning",
   "timeout",
+  "test", // 설치·설정 확인용 시험 알림(실행 중인 run_id 가 있어야 함)
 ]);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DEDUPE_WINDOW_MS = 2 * 60 * 1000;
@@ -45,6 +46,8 @@ function fixedMessage(payload: AuthNotifyPayload): string {
       return `[깐돌이] KB 세션이 곧 재인증될 수 있습니다. 현재 작업을 확인해주세요. (${row})`;
     case "timeout":
       return `[깐돌이] KB 재인증 대기 시간이 초과되어 작업이 멈췄습니다. (${row}, 대기 ${waited})`;
+    case "test":
+      return "[깐돌이] 알림 시험입니다. KB 재인증 창이 뜨면 이 채널로 알림이 갑니다.";
     default:
       throw new Error("unsupported kind");
   }
