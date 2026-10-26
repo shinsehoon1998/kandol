@@ -16,6 +16,14 @@ from pathlib import Path
 from .validators import normalize_phone, normalize_digits
 from .automation import RegisterError, RetryableError, DuplicateCustomerError, DataSkipError
 from .reporter import SUCCESS, FAIL, SKIP
+from . import kb_session
+from .kb_reauth import (
+    ReauthRequired,
+    ReauthState,
+    WAIT_RESUMED,
+    detect_reauth_state,
+    wait_for_reauth as wait_for_reauth_state,
+)
 
 
 def _safe(s: str) -> str:
@@ -52,8 +60,132 @@ class InsuranceAutomation:
         self.context = None
         self.page = None
         self.stop_requested = False
+        self._last_login_monotonic = None
+        self._pre_warning_sent = False
         import solting_auto.insurance
         solting_auto.insurance.active_instance = self
+
+    def _page_descriptors(self):
+        """Playwright의 모든 컨텍스트 페이지를 URL/제목만으로 요약한다."""
+        pages = []
+        contexts = []
+        try:
+            contexts = list(self._browser.contexts) if self._browser else []
+        except Exception:
+            contexts = []
+        if self.context is not None and self.context not in contexts:
+            contexts.append(self.context)
+        for context in contexts:
+            try:
+                raw_pages = list(context.pages)
+            except Exception:
+                continue
+            for page in raw_pages:
+                try:
+                    title = page.title()
+                except Exception:
+                    title = ""
+                try:
+                    url = page.url
+                except Exception:
+                    url = ""
+                pages.append({"url": str(url or ""), "title": str(title or "")})
+        return pages
+
+    def detect_reauth(self) -> ReauthState:
+        """현재 모든 브라우저 창에서 재인증 창/세션 만료를 읽는다."""
+        pages = self._page_descriptors()
+        tabs = [{"type": "page", "url": p["url"]} for p in pages]
+        try:
+            session_state, _ = kb_session.classify_tabs(tabs)
+        except Exception:
+            session_state = kb_session.STATE_NO_BROWSER
+        logged_in = session_state == kb_session.STATE_LOGGED_IN
+        state = detect_reauth_state(pages, logged_in=logged_in)
+        if logged_in and self._last_login_monotonic is None:
+            self._last_login_monotonic = time.monotonic()
+        self._maybe_pre_warning(state)
+        return state
+
+    def _maybe_pre_warning(self, state: ReauthState):
+        """마지막 로그인 확인 후 45분이 지나면 한 번만 사전 알림을 요청한다."""
+        if not state.logged_in or state.required or self._last_login_monotonic is None:
+            return
+        cfg = self.ins.get("reauth", {})
+        try:
+            warning_after = float(cfg.get("pre_warning_sec", 45 * 60))
+        except (TypeError, ValueError):
+            warning_after = 45 * 60
+        if (not self._pre_warning_sent
+                and time.monotonic() - self._last_login_monotonic >= warning_after):
+            self._pre_warning_sent = True
+            self._emit_reauth_notification("pre_warning", row_no=0, waited_min=0)
+
+    def _reauth_probe(self):
+        state = self.detect_reauth()
+        return {
+            "logged_in": state.logged_in,
+            "reauth_window": state.reauth_window,
+            "session_expired": state.session_expired,
+        }
+
+    def _emit_reauth_notification(self, kind, row_no=0, waited_min=0, escalate_sms=False):
+        cfg = self.ins.get("reauth", {})
+        callback = cfg.get("notify") or self.ins.get("reauth_notify")
+        if callback is None:
+            self.log.info(f"[KB 재인증 알림] {kind} (행={row_no}, 대기={waited_min}분)")
+            return
+        try:
+            callback(kind, row=row_no, waited_min=waited_min, escalate_sms=escalate_sms)
+        except Exception as exc:
+            # 알림 네트워크 실패는 인증 대기/자동 재개를 막지 않는다.
+            self.log.warning(f"KB 재인증 알림 요청 실패(대기는 계속): {exc}")
+
+    def _emit_reauth_status(self, phase, row_no, waited_min):
+        callback = self.ins.get("reauth", {}).get("status") or self.ins.get("reauth_status")
+        if callback is None:
+            return
+        try:
+            callback(phase, row=row_no, waited_min=waited_min)
+        except Exception as exc:
+            self.log.warning(f"KB 재인증 상태 기록 실패(대기는 계속): {exc}")
+
+    def wait_for_reauth(self, row_no=0):
+        """사람이 인증을 완료해 로그인 상태가 회복될 때까지 기다린다."""
+        cfg = self.ins.get("reauth", {})
+        try:
+            poll_interval = float(cfg.get("poll_interval_sec", 5))
+            resume_interval = float(cfg.get("resume_interval_sec", 5))
+            max_wait = float(cfg.get("max_wait_sec", 24 * 60 * 60))
+        except (TypeError, ValueError):
+            poll_interval, resume_interval, max_wait = 5.0, 5.0, 24 * 60 * 60
+        try:
+            state = wait_for_reauth_state(
+                probe=self._reauth_probe,
+                notify=lambda kind, **kwargs: (
+                    self._emit_reauth_notification(
+                        kind, row_no=row_no,
+                        waited_min=int(kwargs.get("waited_min", 0)),
+                        escalate_sms=bool(kwargs.get("escalate_sms", False))),
+                    self._emit_reauth_status(
+                        kind, row_no, int(kwargs.get("waited_min", 0)))
+                ),
+                stop_requested=lambda: self.stop_requested,
+                resume_requested=cfg.get("resume_requested"),
+                poll_interval_sec=poll_interval,
+                resume_interval_sec=resume_interval,
+                max_wait_sec=max_wait,
+                escalation_after_sec=float(cfg.get("escalation_after_sec", 10 * 60)),
+                reminder_interval_sec=float(cfg.get("reminder_interval_sec", 30 * 60)),
+                quiet_start=cfg.get("quiet_start", "23:00"),
+                quiet_end=cfg.get("quiet_end", "07:00"),
+            )
+        except Exception:
+            raise
+        if state == WAIT_RESUMED:
+            self._last_login_monotonic = time.monotonic()
+            self._pre_warning_sent = False
+        return state
 
     def __enter__(self):
         from playwright.sync_api import sync_playwright
@@ -210,6 +342,8 @@ class InsuranceAutomation:
                 )
         
         time.sleep(1.0)
+        self._last_login_monotonic = time.monotonic()
+        self._pre_warning_sent = False
         self.log.info("KB 로그인 성공")
 
     def register_and_consent(self, jumin: str, name: str, phone: str) -> str:
@@ -1041,6 +1175,12 @@ class InsuranceAutomation:
         import solting_auto
         solting_auto.check_stop()
 
+        current_reauth = self.detect_reauth()
+        if current_reauth.required:
+            raise ReauthRequired(
+                "KB 재인증 창 또는 로그인 입구가 감지되어 사람 인증을 기다려야 합니다."
+            )
+
         menu = self.sel["consent"].get("menu")
         
         # 1) 기존에 열려 있는 모달이 있다면 닫아서 상태를 리셋합니다.
@@ -1055,9 +1195,15 @@ class InsuranceAutomation:
             with self.context.expect_page(timeout=3000) as pinfo:
                 success = self._click_in_frames(menu, timeout=5000)
                 if not success:
+                    if self.detect_reauth().required:
+                        raise ReauthRequired(
+                            "동의서 메뉴 실패 순간 KB 재인증 창 또는 로그인 입구가 감지되었습니다."
+                        )
                     raise RegisterError(f"메뉴 '{menu}'를 찾을 수 없습니다.")
             popup = pinfo.value
             popup.wait_for_load_state()
+            if self.detect_reauth().reauth_window:
+                raise ReauthRequired("동의서 메뉴 클릭 후 KB 인증방법 선택 창이 열렸습니다.")
             
             # 팝업 창에도 동일한 대화상자 감지 리스너 등록
             def handle_popup_dialog(dialog_obj):
@@ -1074,7 +1220,13 @@ class InsuranceAutomation:
             
             self.log.info("새 브라우저 팝업 창이 감지되었습니다.")
             return popup
+        except ReauthRequired:
+            raise
         except Exception as e:
+            if self.detect_reauth().required:
+                raise ReauthRequired(
+                    "동의서 메뉴 탐색 중 KB 재인증 창 또는 로그인 입구가 감지되었습니다."
+                )
             if "찾을 수 없습니다" in str(e):
                 raise RegisterError(str(e))
                 
