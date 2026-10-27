@@ -880,6 +880,76 @@ class InsuranceAutomation:
                         return True
         return False
 
+    def _detect_death_notice(self, dialog=None):
+        """KB '사망자 정보 확인에 따른 고객정보 처리 제한 안내' 팝업을 감지하고 '확인'을 눌러 닫는다.
+        (2026-10-27 대표 확인 실사진: 신용정보원이 사망자로 통보한 고객이라 동의 업무 자체가
+        막힌 안내창 — 'CU01_0109P.xml' 동의서 출력 팝업 창 안에 뜬다.)
+        감지 시 True. → 재시도해도 살아 돌아오지 않으므로 서버오류와 분리해 이 행만 즉시 SKIP
+        (재시도/서킷브레이커 제외) 처리한다. 닫지 않고 방치하면 다음 고객 처리까지 막힐 수 있다."""
+        keys = ["사망자", "사망자정보", "사망자명의"]
+        confirm_keys = ["처리제한", "처리가제한", "업무가제한", "업무제한", "신용정보원"]
+        sels = [".w2floatingLayer", ".w2window", ".w2modal", "div[class*='w2alert']",
+                "div[class*='popup']", "div[class*='modal']", "div[class*='confirm']"]
+        for f in self._modal_search_targets(dialog):
+            for sel in sels:
+                try:
+                    loc = f.locator(sel)
+                    cnt = loc.count()
+                except Exception:
+                    continue
+                for idx in range(min(cnt, 15)):
+                    try:
+                        el = loc.nth(idx)
+                        if not el.is_visible():
+                            continue
+                        tc = re.sub(r"\s", "", (el.inner_text() or ""))
+                    except Exception:
+                        continue
+                    if tc and any(k in tc for k in keys) and any(k in tc for k in confirm_keys):
+                        self.log.info(f"[사망자] KB 사망자 정보 확인 팝업 감지 → 확인 닫고 이 행 SKIP: {tc[:60]}")
+                        try:
+                            self._click_modal_button(f, el, ["확인"])
+                        except Exception:
+                            pass
+                        return True
+        return False
+
+    def _dump_diagnostic_state(self) -> str:
+        """진단용 — OS 레벨 화면 캡처(pyautogui 등) 대신 Playwright 가 브라우저 내부에서 직접
+        읽는 URL·제목·본문 일부를 문자열로 남긴다. TouchEn Web 같은 보안 프로그램이 화면 캡처를
+        까맣게 막아도(2026-10-26 확인), 이 정보는 OS 캡처를 거치지 않아 영향받지 않는다.
+        실패해도 절대 예외를 던지지 않는다(진단 실패가 본 작업을 막으면 안 됨)."""
+        parts = []
+        try:
+            parts.append(f"url={self.page.url}")
+        except Exception:
+            pass
+        try:
+            parts.append(f"title={self.page.title()}")
+        except Exception:
+            pass
+        try:
+            frame_count = len(self.page.frames)
+            parts.append(f"frames={frame_count}")
+        except Exception:
+            pass
+        try:
+            extra_pages = len(self.context.pages) if self.context else 0
+            parts.append(f"context_pages={extra_pages}")
+        except Exception:
+            pass
+        try:
+            text = self.page.evaluate("() => document.body.innerText.slice(0, 300)")
+            if text:
+                clean = re.sub(r"\s+", " ", text).strip()
+                # 전화번호·주민번호 패턴은 혹시 모를 노출 방지로 가린다(내부 로그용이지만 안전하게)
+                clean = re.sub(r"\d{6}[-\s]?\d{7}", "[주민번호]", clean)
+                clean = re.sub(r"01[0-9][-\s]?\d{3,4}[-\s]?\d{4}", "[전화번호]", clean)
+                parts.append(f"본문={clean[:250]}")
+        except Exception:
+            pass
+        return "[진단] " + " · ".join(parts) if parts else "[진단] 수집 실패"
+
     def _detect_name_error(self, dialog=None):
         """KB 입력검증 팝업('고객 이름을 정확히 입력해주세요' 등)을 감지하고 확인을 눌러 닫는다.
         감지 시 True. → 해당 행은 데이터 문제이므로 재시도/실패가 아니라 SKIP 처리(서킷브레이커 제외)."""
@@ -933,6 +1003,12 @@ class InsuranceAutomation:
                 handled, kind, birth6 = (False, "", "")
             if handled and kind == "consent_block":
                 return "blocked", birth6
+            # 1.5) 사망자 정보 확인 팝업 → 신용정보원 통보, 업무 자체가 막힘(해당 행만 즉시 SKIP)
+            try:
+                if self._detect_death_notice(dialog):
+                    return "death", ""
+            except Exception:
+                pass
             # 2) KB 서버 통신오류 팝업 → 일시 오류로 분류(쿨다운 후 재시도)
             try:
                 if self._detect_server_error(dialog):
@@ -1186,7 +1262,14 @@ class InsuranceAutomation:
         # 1) 기존에 열려 있는 모달이 있다면 닫아서 상태를 리셋합니다.
         self.log.info("이전 작업으로 인해 열려 있는 동의서 출력 모달이 있는지 확인합니다...")
         self._close_consent_dialog(None)
-                
+        # 1.5) 이전 고객 처리 중 사망자 안내 팝업이 닫히지 않고 남아 있으면(방치 시 이후 고객까지
+        # 전부 막힘) 여기서 한 번 더 정리합니다. 이 호출 자체는 이번 고객과 무관합니다.
+        try:
+            if self._detect_death_notice(None):
+                self.log.info("이전 고객 처리 중 남아있던 사망자 안내 팝업을 정리했습니다.")
+        except Exception:
+            pass
+
         # 2) 팝업 창 감지 시도 (expect_page)
         popup = None
         self.log.info(f"동의서 출력 메뉴 클릭 및 팝업 탐지 시작 (셀렉터: {menu})")
@@ -1199,9 +1282,18 @@ class InsuranceAutomation:
                         raise ReauthRequired(
                             "동의서 메뉴 실패 순간 KB 재인증 창 또는 로그인 입구가 감지되었습니다."
                         )
-                    raise RegisterError(f"메뉴 '{menu}'를 찾을 수 없습니다.")
+                    diag = self._dump_diagnostic_state()
+                    raise RegisterError(f"메뉴 '{menu}'를 찾을 수 없습니다. {diag}")
             popup = pinfo.value
             popup.wait_for_load_state()
+            # 이번 고객 자신의 사망자 안내 팝업인지 먼저 확인(재인증 판정보다 우선 — 둘 다 아닌 경우가
+            # 드물게 겹쳐 보일 수 있어 더 구체적인 신호부터 본다)
+            if self._detect_death_notice(popup):
+                try:
+                    popup.close()
+                except Exception:
+                    pass
+                raise DataSkipError("사망자(신용정보원 확인) — 업무 제한으로 처리 제외")
             if self.detect_reauth().reauth_window:
                 raise ReauthRequired("동의서 메뉴 클릭 후 KB 인증방법 선택 창이 열렸습니다.")
             
@@ -1401,6 +1493,9 @@ class InsuranceAutomation:
                 self.last_skip_reason = "이미 서면 동의를 받은 고객(2개월 이내)"
                 self.log.info(f"[{name}] 출력 시점 서면동의 완료 차단 알림 감지 → 등록을 건너뜁니다.")
                 raise DuplicateCustomerError("기등록(KB): 이미 서면 동의를 받은 고객(2개월 이내)")
+            if state == "death":
+                self.log.info(f"[{name}] 사망자 정보 확인(신용정보원 통보) → 업무 제한, 등록을 건너뜁니다.")
+                raise DataSkipError("사망자(신용정보원 확인) — 업무 제한으로 처리 제외")
             if state == "server_error":
                 # KB 서버 통신오류(-S0001 등) → 일시 오류로 보고 쿨다운 후 재시도
                 raise RetryableError("KB 서버 통신 오류(-S0001: 서버와의 통신중 예기치 못한 오류)")
