@@ -22,6 +22,7 @@ import json
 import re
 import time
 import xml.etree.ElementTree as ET
+from collections import Counter
 from datetime import datetime
 
 
@@ -2059,22 +2060,7 @@ def crawl_customers(cdp_url="http://localhost:9222", logger=None,
     if contact_excel_paths:
         try:
             contacts = _read_excel_contacts(contact_excel_paths, logger)
-            pmap = build_phone_map(contacts)
-            amap = {}
-            for c in contacts:
-                nm, bt, ad = c.get("customer_name"), c.get("birth") or "", c.get("address")
-                if nm and ad:
-                    amap[(nm, bt)] = ad
-                    amap.setdefault((nm, ""), ad)
-            matched = 0
-            for rec in results:
-                ph = pmap.get((rec["customer_name"], rec["birth"])) or pmap.get((rec["customer_name"], ""))
-                if ph:
-                    rec["phone"] = ph
-                    matched += 1
-                ad = amap.get((rec["customer_name"], rec["birth"])) or amap.get((rec["customer_name"], ""))
-                if ad:
-                    rec["address"] = ad
+            matched = match_contacts(contacts, results)
             log(f"[수집] 전화번호 매칭: {matched}/{len(results)}건 (엑셀 연락처 {len(contacts)}건)")
         except Exception as ph_err:
             log(f"[수집] 전화번호 매칭 실패(무시): {ph_err}")
@@ -2178,13 +2164,51 @@ def _read_excel_contacts(paths, logger=None):
     return out
 
 
-def build_phone_map(contacts):
-    """연락처 리스트 → {(이름, 생년월일6): 전화} 맵. 생년월일 없는 항목은 (이름,'')로도 보조 등록."""
-    m = {}
+def _birth6(v):
+    """생년월일 → YYMMDD. 8자리는 19·20 으로 시작할 때만 날짜로 본다.
+    KB 목록에서 "70560424"(나이+생년월일이 붙은 값)처럼 읽히는 경우가 있어, 그런 값은 모름("")으로 둔다."""
+    d = re.sub(r"[^0-9]", "", str(v or ""))
+    if len(d) == 6:
+        return d
+    if len(d) == 8 and d[:2] in ("19", "20"):
+        return d[2:]
+    return ""
+
+
+def match_contacts(contacts, results):
+    """엑셀 연락처(이름·생년월일·전화·주소)를 KB 수집 고객(results)에 붙인다. 전화를 붙인 건수를 돌려준다.
+
+    같은 사람은 (이름, 생년월일6)이 같아야 한다. 예전에는 생년월일이 안 맞으면 이름만 같은 첫
+    연락처를 붙였고, 그래서 동명이인의 번호·주소가 다른 사람의 보험계약 밑에 실려 보픽까지 갔다
+    (2026-10-28 보픽 FB-0019 — 같은 이름·같은 번호·다른 생년월일 24묶음, 상담사가 A 에게 전화하며 B 의 계약을 봄).
+
+    이름만으로 붙이는 건 한쪽에 생년월일이 없고(목록에서 못 읽었거나 엑셀에 주민번호 칸이 없거나),
+    그 이름이 엑셀에서도 이번 수집분에서도 한 명뿐일 때만이다. 양쪽 생년월일이 다 있는데 다르면 다른 사람이다.
+    """
+    exact = {}     # (이름, 생년월일6) → 연락처. 생년월일 없는 연락처는 (이름, "")
+    by_name = {}   # 이름 → [연락처…]
     for c in contacts or []:
-        nm, bt, ph = c.get("customer_name"), c.get("birth") or "", c.get("phone")
-        if not nm or not ph:
+        nm = str(c.get("customer_name") or "").strip()
+        if not nm:
             continue
-        m[(nm, bt)] = ph
-        m.setdefault((nm, ""), ph)
-    return m
+        exact.setdefault((nm, _birth6(c.get("birth"))), c)
+        by_name.setdefault(nm, []).append(c)
+    kb_names = Counter(str(r.get("customer_name") or "").strip() for r in results)
+
+    matched = 0
+    for rec in results:
+        nm = str(rec.get("customer_name") or "").strip()
+        bt = _birth6(rec.get("birth"))
+        c = exact.get((nm, bt)) if bt else None
+        if c is None:
+            same = by_name.get(nm, [])
+            if len(same) == 1 and kb_names[nm] == 1 and not (bt and _birth6(same[0].get("birth"))):
+                c = same[0]
+        if c is None:
+            continue
+        if c.get("phone"):
+            rec["phone"] = c["phone"]
+            matched += 1
+        if c.get("address"):
+            rec["address"] = c["address"]
+    return matched
