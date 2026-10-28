@@ -44,11 +44,22 @@ class MatchContactsTest(unittest.TestCase):
         self.assertEqual(match_contacts(contacts, results), 1)
         self.assertEqual(results[0]["phone"], "010-0000-0002")
 
-    def test_kb_birth_garbage_8_digits_is_unknown(self):
-        # "70560424" = 나이 70 + 생년월일 560424 가 붙은 수집 오류. 날짜로 보지 않는다.
-        contacts = [contact("박마바", "560424", "010-0000-0003")]
+    def test_kb_birth_age_prefixed_uses_tail(self):
+        # "70560424" = 나이 70 + 생년월일 560424 가 붙은 수집 오류. 뒤 6자리로 정확히 맞춘다 —
+        # 동명이인이 있어도 이름만으로 붙이지 않고 생년월일로 가린다.
+        contacts = [contact("박마바", "560424", "010-0000-0003"), contact("박마바", "600101", "010-0000-0011")]
         results = [kb("박마바", "70560424")]
         self.assertEqual(match_contacts(contacts, results), 1)
+        self.assertEqual(results[0]["phone"], "010-0000-0003")
+
+    def test_kb_birth_unparseable_8_digits_is_unknown(self):
+        # 뒤 6자리도 날짜 모양이 아니면 모름 — 한쪽 생년월일이 없는 셈이라 이름이 양쪽에서 한 명뿐일 때만 붙는다.
+        contacts = [contact("서더러", "560424", "010-0000-0012")]
+        results = [kb("서더러", "12999999")]
+        self.assertEqual(match_contacts(contacts, results), 1)
+        contacts.append(contact("서더러", "600101", "010-0000-0013"))
+        results = [kb("서더러", "12999999")]
+        self.assertEqual(match_contacts(contacts, results), 0, "동명이인이 있으면 모르는 생년월일로는 안 붙인다")
 
     def test_excel_without_jumin_unique_name_matches(self):
         contacts = [contact("최사아", "", "010-0000-0004")]

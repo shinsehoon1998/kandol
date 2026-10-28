@@ -2165,12 +2165,16 @@ def _read_excel_contacts(paths, logger=None):
 
 
 def _birth6(v):
-    """생년월일 → YYMMDD. 8자리는 19·20 으로 시작할 때만 날짜로 본다.
-    KB 목록에서 "70560424"(나이+생년월일이 붙은 값)처럼 읽히는 경우가 있어, 그런 값은 모름("")으로 둔다."""
+    """생년월일 → YYMMDD. 8자리는 19·20 으로 시작하면 YYYYMMDD.
+    아니면 KB 목록이 "70560424"(나이 두 자리 + YYMMDD)처럼 붙여 읽은 값이라(보픽 실측 1,119건 중 910건이
+    앞 두 자리 = 뒤 6자리의 나이) 뒤 6자리가 날짜 모양일 때만 그걸 쓴다. 그 밖은 모름("").
+    보픽 supabase/functions/_shared/leadIdentity.ts sameBirth 와 같은 규칙."""
     d = re.sub(r"[^0-9]", "", str(v or ""))
     if len(d) == 6:
         return d
     if len(d) == 8 and d[:2] in ("19", "20"):
+        return d[2:]
+    if len(d) == 8 and re.fullmatch(r"\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])", d[2:]):
         return d[2:]
     return ""
 
